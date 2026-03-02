@@ -1,0 +1,88 @@
+# ===============================
+# Python
+# ===============================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ===============================
+# Virtual Environments
+# ===============================
+.venv/
+venv/
+env/
+ENV/
+
+# ===============================
+# Cursor / VS Code
+# ===============================
+.cursor/
+.vscode/
+*.code-workspace
+
+# ===============================
+# OS files
+# ===============================
+.DS_Store
+Thumbs.db
+
+# ===============================
+# Logs
+# ===============================
+*.log
+logs/
+wandb/
+mlruns/
+
+# ===============================
+# Jupyter
+# ===============================
+.ipynb_checkpoints/
+
+# ===============================
+# Computer Vision / ML
+# ===============================
+# Dataset (non versionare dati pesanti)
+data/
+datasets/
+images/
+videos/
+
+# Output training / inference
+runs/
+outputs/
+results/
+checkpoints/
+weights/
+models/*.pth
+models/*.pt
+models/*.onnx
+
+# TensorFlow / PyTorch cache
+.cache/
+torch_logs/
+lightning_logs/
+
+# ===============================
+# Config locali / segreti
+# ===============================
+.env
+.env.local
+.env.*.local
+
+# ===============================
+# Build / export
+# ===============================
+build/
+dist/
+*.egg-info/
+
+# ===============================
+# Test / coverage
+# ===============================
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ===============================
+docs/
