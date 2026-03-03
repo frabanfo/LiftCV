@@ -11,16 +11,19 @@ peso corporeo e 1RM storico opzionali) e stampa il report a console.
 import argparse
 import sys
 from pathlib import Path
+from typing import Optional
+
+import numpy as np
 
 # Aggiunge la root del progetto al path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.io.video import load_video, iter_frames
 from src.io.output import AnalysisResult, print_report
-from src.tracking.pose import PoseEstimator
+from src.tracking.pose import PoseEstimator, PoseFrame
 from src.tracking.bar_tracker import BarTracker, detect_bar_in_roi
-from src.segmentation import segment_repetition
-from src.validation import check_depth, check_lockout, check_feet
+from src.segmentation import segment_repetition, Phase
+from src.validation import check_depth, check_lockout, check_feet, CriterionResult
 from src.metrics import compute_metrics
 from src import config
 
@@ -41,15 +44,268 @@ def main():
     print(f"  {meta.frame_count} frame  |  {meta.fps:.1f} fps  |  {meta.width}×{meta.height}px")
 
     # ── Dati utente ──────────────────────────────────────────────────────────
-    bar_weight_kg = _ask_float("Peso sul bilanciere (kg) [obbligatorio]: ", required=True)
-    body_weight_kg = _ask_float("Peso corporeo (kg) [invio per saltare]: ", required=False)
-    historical_1rm_kg = _ask_float("1RM storico (kg) [invio per saltare]: ", required=False)
+    bar_weight_kg     = _ask_float("Peso sul bilanciere (kg) [obbligatorio]: ", required=True)
+    body_weight_kg    = _ask_float("Peso corporeo (kg) [invio per saltare]: ", required=False)    # noqa: F841  (reserved for future use)
+    historical_1rm_kg = _ask_float("1RM storico (kg) [invio per saltare]: ",   required=False)   # noqa: F841
 
-    # ── TODO: pipeline completa ──────────────────────────────────────────────
-    # Placeholder — la pipeline verrà implementata incrementalmente.
-    # Al momento stampa un report di esempio per verificare che tutto si avvii.
-    print("\n[Pipeline non ancora implementata — report di esempio]\n")
+    # ── Scan frame: pose + barra ──────────────────────────────────────────────
+    print("\nAnalisi in corso...")
 
+    pose_frames: list[Optional[PoseFrame]] = []
+    bar_x_px:    list[Optional[float]]     = []
+    bar_y_px:    list[Optional[float]]     = []
+
+    bar_tracker    = BarTracker()
+    bar_initialized = False
+
+    with PoseEstimator() as pose_est:
+        for frame_bgr in iter_frames(cap):
+            pf = pose_est.process_frame(frame_bgr)
+            pose_frames.append(pf)
+
+            detection = _detect_bar(pf, frame_bgr, meta.width, meta.height)
+
+            if not bar_initialized and detection is not None:
+                bar_tracker.initialize(detection[0], detection[1])
+                bar_initialized = True
+
+            pos = bar_tracker.update(detection) if bar_initialized else None
+            bar_x_px.append(pos[0] if pos else None)
+            bar_y_px.append(pos[1] if pos else None)
+
+    cap.release()
+
+    if not bar_initialized:
+        _print_rejection(
+            "Barra non rilevata nel video. "
+            "Assicurarsi che la barra sia visibile e illuminata correttamente.",
+            bar_weight_kg,
+        )
+        return
+
+    # ── Segmentazione ─────────────────────────────────────────────────────────
+    bar_y_arr = np.array([y if y is not None else np.nan for y in bar_y_px])
+    seg = segment_repetition(bar_y_arr, meta.fps)
+
+    if not seg.success:
+        _print_rejection(seg.failure_reason, bar_weight_kg)
+        return
+
+    bottom_seg  = seg.get(Phase.BOTTOM)
+    setup_seg   = seg.get(Phase.SETUP)
+    lockout_seg = seg.get(Phase.LOCKOUT)
+
+    # ── Validazione criteri KO ────────────────────────────────────────────────
+    depth_result, depth_angle = _check_depth_at(pose_frames, bottom_seg.start_frame)
+    init_lockout  = _check_lockout_at(pose_frames, setup_seg.end_frame,    "iniziale")
+    final_lockout = _check_lockout_at(pose_frames, lockout_seg.start_frame, "finale")
+    feet_result   = _check_feet_series(pose_frames, setup_seg)
+
+    # ── Metriche ─────────────────────────────────────────────────────────────
+    # px_per_meter non calibrato nell'MVP → ROM, velocità e deviazione = N/D
+    metrics = compute_metrics(
+        bar_y_px=bar_y_px,
+        bar_x_px=bar_x_px,
+        segmentation=seg,
+        fps=meta.fps,
+        px_per_meter=None,
+        bar_weight_kg=bar_weight_kg,
+    )
+
+    # ── Validità e confidenza complessiva ─────────────────────────────────────
+    ko_criteria = [depth_result, init_lockout, final_lockout, feet_result]
+    valid, confidence = _aggregate_validity(ko_criteria)
+
+    bar_stability_ok: Optional[bool] = (
+        metrics.bar_deviation_cm < 5.0
+        if metrics.bar_deviation_cm is not None else None
+    )
+
+    result = AnalysisResult(
+        valid=valid,
+        confidence=confidence,
+        depth_ok=depth_result.passed,
+        depth_angle_deg=depth_angle,
+        initial_lockout_ok=init_lockout.passed,
+        final_lockout_ok=final_lockout.passed,
+        feet_ok=feet_result.passed,
+        rom_m=metrics.rom_m,
+        avg_concentric_ms=metrics.avg_concentric_ms,
+        peak_concentric_ms=metrics.peak_concentric_ms,
+        bar_deviation_cm=metrics.bar_deviation_cm,
+        bar_weight_kg=bar_weight_kg,
+        estimated_1rm_pct=metrics.estimated_1rm_pct,
+        bar_stability_ok=bar_stability_ok,
+        symmetry_pct=None,
+        symmetry_confidence=None,
+    )
+    print_report(result)
+
+
+# ── Pipeline helpers ──────────────────────────────────────────────────────────
+
+def _detect_bar(
+    pf: Optional[PoseFrame],
+    frame_bgr,
+    width: int,
+    height: int,
+) -> Optional[tuple[float, float]]:
+    """
+    Stima la posizione della barra nel frame corrente.
+
+    Strategia:
+    1. Calcola il punto medio dei polsi (proxy barra in back-squat).
+    2. Prova detect_bar_in_roi (colore cromato) in una ROI intorno a quel punto.
+    3. Se fallisce ma i polsi sono visibili, usa il loro punto medio come fallback.
+    4. Se i polsi non sono visibili, usa il punto medio delle spalle.
+    """
+    if pf is None:
+        return None
+
+    lw = pf.keypoints.get("left_wrist")
+    rw = pf.keypoints.get("right_wrist")
+    vis_lw = pf.visibility.get("left_wrist", 0.0)
+    vis_rw = pf.visibility.get("right_wrist", 0.0)
+
+    if lw is not None and rw is not None:
+        mx, my = (lw[0] + rw[0]) / 2, (lw[1] + rw[1]) / 2
+        wrist_visible = (vis_lw + vis_rw) / 2 > 0.5
+    else:
+        # Fallback: punto medio spalle
+        ls = pf.keypoints.get("left_shoulder")
+        rs = pf.keypoints.get("right_shoulder")
+        if ls is None or rs is None:
+            return None
+        mx, my = (ls[0] + rs[0]) / 2, (ls[1] + rs[1]) / 2
+        wrist_visible = False
+
+    r = 60
+    roi = (
+        max(0, int(mx - r)),
+        max(0, int(my - r)),
+        min(width  - max(0, int(mx - r)), 2 * r),
+        min(height - max(0, int(my - r)), 2 * r),
+    )
+    detected = detect_bar_in_roi(frame_bgr, roi)
+    if detected is not None:
+        return detected
+
+    return (mx, my) if wrist_visible else None
+
+
+def _dominant_side(pf: PoseFrame, landmarks: list[str]) -> str:
+    """Ritorna 'left' o 'right': il lato con la visibilità maggiore."""
+    left_vis  = sum(pf.visibility.get(f"left_{lm}",  0.0) for lm in landmarks)
+    right_vis = sum(pf.visibility.get(f"right_{lm}", 0.0) for lm in landmarks)
+    return "left" if left_vis >= right_vis else "right"
+
+
+def _check_depth_at(
+    pose_frames: list[Optional[PoseFrame]],
+    frame_idx: int,
+) -> tuple[CriterionResult, Optional[float]]:
+    """Profondità al frame di bottom. Ritorna (CriterionResult, depth_angle_deg)."""
+    pf = pose_frames[frame_idx] if frame_idx < len(pose_frames) else None
+    if pf is None:
+        return CriterionResult(None, 0.0, "Pose non rilevata al bottom."), None
+
+    side     = _dominant_side(pf, ["hip", "knee"])
+    hip_kp   = pf.keypoints.get(f"{side}_hip")
+    knee_kp  = pf.keypoints.get(f"{side}_knee")
+    hip_vis  = pf.visibility.get(f"{side}_hip",  0.0)
+    knee_vis = pf.visibility.get(f"{side}_knee", 0.0)
+
+    if hip_kp is None or knee_kp is None:
+        return CriterionResult(None, 0.0, "Keypoint anca/ginocchio assenti al bottom."), None
+
+    result    = check_depth(hip_kp[1], knee_kp[1], hip_vis, knee_vis)
+    angle_deg = float(np.degrees(np.arctan2(hip_kp[1] - knee_kp[1], 1.0)))
+    return result, angle_deg
+
+
+def _check_lockout_at(
+    pose_frames: list[Optional[PoseFrame]],
+    frame_idx: int,
+    label: str,
+) -> CriterionResult:
+    """Lockout (estensione anca + ginocchio) a un singolo frame."""
+    pf = pose_frames[frame_idx] if frame_idx < len(pose_frames) else None
+    if pf is None:
+        return CriterionResult(None, 0.0, f"Pose non rilevata al lockout {label}.")
+
+    side     = _dominant_side(pf, ["hip", "knee"])
+    hip_kp   = pf.keypoints.get(f"{side}_hip")
+    knee_kp  = pf.keypoints.get(f"{side}_knee")
+    hip_vis  = pf.visibility.get(f"{side}_hip",  0.0)
+    knee_vis = pf.visibility.get(f"{side}_knee", 0.0)
+
+    if hip_kp is None or knee_kp is None:
+        return CriterionResult(None, 0.0, f"Keypoint assenti al lockout {label}.")
+
+    return check_lockout(hip_kp[1], knee_kp[1], hip_vis, knee_vis, label)
+
+
+def _check_feet_series(
+    pose_frames: list[Optional[PoseFrame]],
+    setup_seg,
+) -> CriterionResult:
+    """
+    Verifica contatto continuo piedi–pedana su tutta la ripetizione.
+    Usa la posizione mediana della caviglia nel setup come riferimento.
+    """
+    # Determina lato dominante dalla prima frame valida
+    side = "left"
+    for pf in pose_frames:
+        if pf is not None:
+            side = _dominant_side(pf, ["ankle"])
+            break
+
+    ankle_key = f"{side}_ankle"
+    ankle_y_all  = [
+        pf.keypoints[ankle_key][1]
+        if pf is not None and ankle_key in pf.keypoints else None
+        for pf in pose_frames
+    ]
+    ankle_vis_all = [
+        pf.visibility.get(ankle_key, 0.0) if pf is not None else 0.0
+        for pf in pose_frames
+    ]
+
+    # Riferimento Y dal setup
+    setup_range = ankle_y_all[setup_seg.start_frame : setup_seg.end_frame + 1]
+    valid_setup = [v for v in setup_range if v is not None]
+    if not valid_setup:
+        return CriterionResult(None, 0.0, "Caviglia non rilevata nel setup.")
+
+    initial_ankle_y = float(np.median(valid_setup))
+
+    # Sostituisce i None con il riferimento (frame occlusi non innescano falsi positivi)
+    ankle_y_filled = [y if y is not None else initial_ankle_y for y in ankle_y_all]
+
+    return check_feet(
+        ankle_y_series=ankle_y_filled,
+        initial_ankle_y=initial_ankle_y,
+        visibility_series=ankle_vis_all,
+    )
+
+
+def _aggregate_validity(criteria: list[CriterionResult]) -> tuple[bool, float]:
+    """
+    Calcola validità e confidenza complessiva dai criteri KO.
+    - Un criterio False con confidenza >= BORDERLINE rende la rep non valida.
+    - La confidenza finale è il minimo tra tutti i criteri.
+    """
+    valid = True
+    confidences = []
+    for c in criteria:
+        if c.passed is False and c.confidence >= config.CONFIDENCE_BORDERLINE:
+            valid = False
+        confidences.append(c.confidence)
+    confidence = float(min(confidences)) if confidences else 0.0
+    return valid, confidence
+
+
+def _print_rejection(reason: str, bar_weight_kg: Optional[float] = None) -> None:
     result = AnalysisResult(
         valid=False,
         confidence=0.0,
@@ -67,11 +323,9 @@ def main():
         bar_stability_ok=None,
         symmetry_pct=None,
         symmetry_confidence=None,
-        rejection_reason="Pipeline non ancora implementata.",
+        rejection_reason=reason,
     )
     print_report(result)
-
-    cap.release()
 
 
 def _ask_float(prompt: str, required: bool) -> float | None:
