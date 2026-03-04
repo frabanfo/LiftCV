@@ -26,11 +26,13 @@ from src.segmentation import segment_repetition, Phase
 from src.validation import check_depth, check_lockout, check_feet, CriterionResult
 from src.metrics import compute_metrics
 from src import config
+from src.config import TIBIA_HEIGHT_RATIO, CONFIDENCE_BORDERLINE
 
 
 def main():
     parser = argparse.ArgumentParser(description="LiftCV — Analisi squat da video laterale")
     parser.add_argument("video", help="Percorso del video da analizzare")
+    parser.add_argument("--debug", action="store_true", help="Stampa info diagnostiche sul segnale barra e segmentazione")
     args = parser.parse_args()
 
     # ── Caricamento video ────────────────────────────────────────────────────
@@ -45,6 +47,7 @@ def main():
 
     # ── Dati utente ──────────────────────────────────────────────────────────
     bar_weight_kg     = _ask_float("Peso sul bilanciere (kg) [obbligatorio]: ", required=True)
+    height_m          = _ask_height("Altezza atleta (m, es. 1.75) [obbligatorio]: ")
     body_weight_kg    = _ask_float("Peso corporeo (kg) [invio per saltare]: ", required=False)    # noqa: F841  (reserved for future use)
     historical_1rm_kg = _ask_float("1RM storico (kg) [invio per saltare]: ",   required=False)   # noqa: F841
 
@@ -58,12 +61,18 @@ def main():
     bar_tracker    = BarTracker()
     bar_initialized = False
 
+    detection_count = 0
+    total_frames    = 0
+
     with PoseEstimator() as pose_est:
         for frame_bgr in iter_frames(cap):
             pf = pose_est.process_frame(frame_bgr)
             pose_frames.append(pf)
 
             detection = _detect_bar(pf, frame_bgr, meta.width, meta.height)
+            total_frames += 1
+            if detection is not None:
+                detection_count += 1
 
             if not bar_initialized and detection is not None:
                 bar_tracker.initialize(detection[0], detection[1])
@@ -75,6 +84,11 @@ def main():
 
     cap.release()
 
+    if args.debug:
+        pose_detected = sum(1 for pf in pose_frames if pf is not None)
+        print(f"\n[DEBUG] Pose rilevata:   {pose_detected}/{total_frames} frame ({pose_detected/total_frames:.0%})")
+        print(f"[DEBUG] Barra rilevata:  {detection_count}/{total_frames} frame ({detection_count/total_frames:.0%})")
+
     if not bar_initialized:
         _print_rejection(
             "Barra non rilevata nel video. "
@@ -85,7 +99,26 @@ def main():
 
     # ── Segmentazione ─────────────────────────────────────────────────────────
     bar_y_arr = np.array([y if y is not None else np.nan for y in bar_y_px])
+
+    if args.debug:
+        valid_y = bar_y_arr[~np.isnan(bar_y_arr)]
+        bottom_idx_dbg = int(np.nanargmax(bar_y_arr))
+        print(f"\n[DEBUG] Segnale barra Y:")
+        print(f"  Range:      {valid_y.min():.0f}–{valid_y.max():.0f} px  (Δ={valid_y.max()-valid_y.min():.0f} px)")
+        print(f"  NaN:        {np.isnan(bar_y_arr).sum()}/{len(bar_y_arr)} frame")
+        print(f"  Bottom idx: frame {bottom_idx_dbg}  (Y={bar_y_arr[bottom_idx_dbg]:.0f} px)")
+        print(f"  Inizio:     Y={valid_y[0]:.0f} px  |  Fine: Y={valid_y[-1]:.0f} px")
+
     seg = segment_repetition(bar_y_arr, meta.fps)
+
+    if args.debug:
+        status = "OK" if seg.success else "FALLITA"
+        print(f"\n[DEBUG] Segmentazione — {status}")
+        for s in seg.segments:
+            flag = "  ← PROBLEMA" if s.confidence < CONFIDENCE_BORDERLINE else ""
+            print(f"  {s.phase.name:<10} frame {s.start_frame:>4}–{s.end_frame:<4}  conf={s.confidence:.0%}{flag}")
+        if not seg.success:
+            print(f"  Motivo: {seg.failure_reason}")
 
     if not seg.success:
         _print_rejection(seg.failure_reason, bar_weight_kg)
@@ -95,6 +128,11 @@ def main():
     setup_seg   = seg.get(Phase.SETUP)
     lockout_seg = seg.get(Phase.LOCKOUT)
 
+    # ── Calibrazione scala ────────────────────────────────────────────────────
+    px_per_meter = _compute_px_per_meter(pose_frames, setup_seg, height_m)
+    if px_per_meter is None:
+        print("  Avviso: scala non calcolabile (tibia non visibile nel setup) — metriche in m/s = N/D.")
+
     # ── Validazione criteri KO ────────────────────────────────────────────────
     depth_result, depth_angle = _check_depth_at(pose_frames, bottom_seg.start_frame)
     init_lockout  = _check_lockout_at(pose_frames, setup_seg.end_frame,    "iniziale")
@@ -102,13 +140,12 @@ def main():
     feet_result   = _check_feet_series(pose_frames, setup_seg)
 
     # ── Metriche ─────────────────────────────────────────────────────────────
-    # px_per_meter non calibrato nell'MVP → ROM, velocità e deviazione = N/D
     metrics = compute_metrics(
         bar_y_px=bar_y_px,
         bar_x_px=bar_x_px,
         segmentation=seg,
         fps=meta.fps,
-        px_per_meter=None,
+        px_per_meter=px_per_meter,
         bar_weight_kg=bar_weight_kg,
     )
 
@@ -200,6 +237,44 @@ def _dominant_side(pf: PoseFrame, landmarks: list[str]) -> str:
     return "left" if left_vis >= right_vis else "right"
 
 
+def _compute_px_per_meter(
+    pose_frames: list[Optional[PoseFrame]],
+    setup_seg,
+    height_m: float,
+) -> Optional[float]:
+    """
+    Stima px/metro usando la tibia come riferimento antropometrico.
+    Lunghezza tibia stimata = altezza × TIBIA_HEIGHT_RATIO (Drillis & Contini).
+    Misura la tibia in pixel sui frame stabili del setup e ne prende la mediana.
+    """
+    tibia_m = height_m * TIBIA_HEIGHT_RATIO
+
+    side = "left"
+    for pf in pose_frames[setup_seg.start_frame:setup_seg.end_frame + 1]:
+        if pf is not None:
+            side = _dominant_side(pf, ["knee", "ankle"])
+            break
+
+    lengths_px = []
+    for pf in pose_frames[setup_seg.start_frame:setup_seg.end_frame + 1]:
+        if pf is None:
+            continue
+        knee  = pf.keypoints.get(f"{side}_knee")
+        ankle = pf.keypoints.get(f"{side}_ankle")
+        kv    = pf.visibility.get(f"{side}_knee",  0.0)
+        av    = pf.visibility.get(f"{side}_ankle", 0.0)
+        if knee is not None and ankle is not None and min(kv, av) > 0.5:
+            dx = knee[0] - ankle[0]
+            dy = knee[1] - ankle[1]
+            lengths_px.append(np.sqrt(dx ** 2 + dy ** 2))
+
+    if not lengths_px:
+        return None
+
+    tibia_px = float(np.median(lengths_px))
+    return tibia_px / tibia_m
+
+
 def _check_depth_at(
     pose_frames: list[Optional[PoseFrame]],
     frame_idx: int,
@@ -218,8 +293,10 @@ def _check_depth_at(
     if hip_kp is None or knee_kp is None:
         return CriterionResult(None, 0.0, "Keypoint anca/ginocchio assenti al bottom."), None
 
-    result    = check_depth(hip_kp[1], knee_kp[1], hip_vis, knee_vis)
-    angle_deg = float(np.degrees(np.arctan2(hip_kp[1] - knee_kp[1], 1.0)))
+    result    = check_depth(hip_kp[0], hip_kp[1], knee_kp[0], knee_kp[1], hip_vis, knee_vis)
+    dx        = hip_kp[0] - knee_kp[0]
+    dy        = hip_kp[1] - knee_kp[1]
+    angle_deg = float(np.degrees(np.arctan2(dy, abs(dx))))
     return result, angle_deg
 
 
@@ -228,21 +305,29 @@ def _check_lockout_at(
     frame_idx: int,
     label: str,
 ) -> CriterionResult:
-    """Lockout (estensione anca + ginocchio) a un singolo frame."""
+    """Lockout (estensione ginocchio + anca) a un singolo frame tramite angoli geometrici."""
     pf = pose_frames[frame_idx] if frame_idx < len(pose_frames) else None
     if pf is None:
         return CriterionResult(None, 0.0, f"Pose non rilevata al lockout {label}.")
 
-    side     = _dominant_side(pf, ["hip", "knee"])
-    hip_kp   = pf.keypoints.get(f"{side}_hip")
-    knee_kp  = pf.keypoints.get(f"{side}_knee")
-    hip_vis  = pf.visibility.get(f"{side}_hip",  0.0)
-    knee_vis = pf.visibility.get(f"{side}_knee", 0.0)
+    side         = _dominant_side(pf, ["hip", "knee", "ankle"])
+    shoulder_kp  = pf.keypoints.get(f"{side}_shoulder")
+    hip_kp       = pf.keypoints.get(f"{side}_hip")
+    knee_kp      = pf.keypoints.get(f"{side}_knee")
+    ankle_kp     = pf.keypoints.get(f"{side}_ankle")
+    shoulder_vis = pf.visibility.get(f"{side}_shoulder", 0.0)
+    hip_vis      = pf.visibility.get(f"{side}_hip",      0.0)
+    knee_vis     = pf.visibility.get(f"{side}_knee",     0.0)
+    ankle_vis    = pf.visibility.get(f"{side}_ankle",    0.0)
 
-    if hip_kp is None or knee_kp is None:
+    if None in (shoulder_kp, hip_kp, knee_kp, ankle_kp):
         return CriterionResult(None, 0.0, f"Keypoint assenti al lockout {label}.")
 
-    return check_lockout(hip_kp[1], knee_kp[1], hip_vis, knee_vis, label)
+    return check_lockout(
+        shoulder_kp, hip_kp, knee_kp, ankle_kp,
+        shoulder_vis, hip_vis, knee_vis, ankle_vis,
+        label,
+    )
 
 
 def _check_feet_series(
@@ -293,14 +378,17 @@ def _aggregate_validity(criteria: list[CriterionResult]) -> tuple[bool, float]:
     """
     Calcola validità e confidenza complessiva dai criteri KO.
     - Un criterio False con confidenza >= BORDERLINE rende la rep non valida.
-    - La confidenza finale è il minimo tra tutti i criteri.
+    - La confidenza finale è il minimo tra i criteri con esito definitivo (True/False).
+      I criteri N/D (passed=None) non abbassano la confidenza: rappresentano
+      "non osservabile", non "fallito".
     """
     valid = True
     confidences = []
     for c in criteria:
         if c.passed is False and c.confidence >= config.CONFIDENCE_BORDERLINE:
             valid = False
-        confidences.append(c.confidence)
+        if c.passed is not None:
+            confidences.append(c.confidence)
     confidence = float(min(confidences)) if confidences else 0.0
     return valid, confidence
 
@@ -340,6 +428,31 @@ def _ask_float(prompt: str, required: bool) -> float | None:
             return float(raw.replace(",", "."))
         except ValueError:
             print("  → Inserisci un numero valido.")
+
+
+def _ask_height(prompt: str) -> float:
+    """Chiede l'altezza in metri. Converte automaticamente se inserita in cm."""
+    while True:
+        raw = input(prompt).strip()
+        if not raw:
+            print("  → Campo obbligatorio.")
+            continue
+        try:
+            val = float(raw.replace(",", "."))
+        except ValueError:
+            print("  → Inserisci un numero valido (es. 1.75).")
+            continue
+        if val > 3.0:
+            # Probabilmente inserito in cm
+            val_m = val / 100.0
+            confirm = input(f"  → Intendi {val_m:.2f} m? [invio = sì, n = reinserisci]: ").strip().lower()
+            if confirm in ("", "s", "si", "sì", "y", "yes"):
+                return val_m
+            continue
+        if val < 1.0:
+            print("  → Altezza non plausibile. Inserisci in metri (es. 1.75).")
+            continue
+        return val
 
 
 if __name__ == "__main__":

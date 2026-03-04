@@ -47,7 +47,7 @@ data/
 datasets/
 images/
 videos/
-
+gt/
 # Output training / inference
 runs/
 outputs/

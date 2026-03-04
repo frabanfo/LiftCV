@@ -53,7 +53,7 @@ class BarTracker:
                 return None
             self._kf.predict()  # predizione senza misurazione
 
-        x, y = float(self._kf.x[0]), float(self._kf.x[1])
+        x, y = float(self._kf.x[0, 0]), float(self._kf.x[1, 0])
         return (x, y)
 
     # ── private ──────────────────────────────────────────────────────────────

@@ -101,17 +101,34 @@ def segment_repetition(
     # Indice del bottom = massimo di y_smooth (barra al punto più basso)
     bottom_idx = int(np.argmax(y_smooth))
 
-    # DESCENT: primo frame con velocità > threshold fino al bottom
-    descent_start = _first_above(velocity[:bottom_idx], vel_threshold)
-    if descent_start is None:
-        return SegmentationResult(
-            success=False,
-            failure_reason="Fase di discesa non rilevabile.",
-        )
+    # Finestra di stabilità: ≥ 0.7s — abbastanza lunga da superare qualsiasi
+    # velocità di discesa realistica (evita falsi positivi per decelerazione).
+    min_stable = max(20, int(fps * 0.7))
+    # Offset minimo dal bottom prima di iniziare la ricerca: ≥ 0.5s.
+    min_phase = max(15, int(fps * 0.5))
+    # Soglia di stabilità Y: 8% del range totale — abbastanza grande da
+    # distinguere "fermo" (rumore ≈ 3-5 px) da "in movimento" (≥ 20 px su 0.7s).
+    y_range = float(np.nanmax(y_smooth) - np.nanmin(y_smooth))
+    stability_thr = max(8.0, y_range * 0.08)
 
-    # ASCENT: dal bottom al primo frame in cui si torna a vel ≈ 0
-    ascent_end = _first_below(velocity[bottom_idx:], -vel_threshold)
-    ascent_end = bottom_idx + (ascent_end if ascent_end is not None else len(velocity) - bottom_idx - 1)
+    # DESCENT: l'ultimo periodo stabile di Y prima del bottom è la posizione eretta.
+    # Cerchiamo a ritroso partendo da almeno min_phase frame prima del bottom.
+    n_frames = len(y)
+    descent_start = 0
+    for i in range(bottom_idx - min_stable - min_phase, -1, -1):
+        w = y_smooth[i : i + min_stable]
+        if float(np.max(w) - np.min(w)) < stability_thr:
+            descent_start = i + min_stable
+            break
+
+    # ASCENT: il primo periodo stabile di Y dopo il bottom è il lockout.
+    # Cerchiamo in avanti partendo da almeno min_phase frame dopo il bottom.
+    ascent_end = n_frames - 1
+    for i in range(bottom_idx + min_phase, n_frames - min_stable + 1):
+        w = y_smooth[i : i + min_stable]
+        if float(np.max(w) - np.min(w)) < stability_thr:
+            ascent_end = i
+            break
 
     n = len(y)
     segments = [
@@ -122,10 +139,13 @@ def segment_repetition(
         PhaseSegment(Phase.LOCKOUT,  ascent_end,    n - 1,          _confidence_flat(velocity[ascent_end:])),
     ]
 
-    # Controlla confidenza minima su tutte le fasi
-    min_conf = min(s.confidence for s in segments)
+    # Controlla confidenza minima solo sulle fasi di movimento (DESCENT, BOTTOM, ASCENT).
+    # SETUP e LOCKOUT possono contenere walkout/re-rack e non sono fasi analitiche.
+    movement_phases = {Phase.DESCENT, Phase.BOTTOM, Phase.ASCENT}
+    min_conf = min(s.confidence for s in segments if s.phase in movement_phases)
     if min_conf < CONFIDENCE_BORDERLINE:
         return SegmentationResult(
+            segments=segments,
             success=False,
             failure_reason=f"Confidenza insufficiente sulla segmentazione delle fasi ({min_conf:.0%}).",
         )
@@ -147,13 +167,6 @@ def _interpolate_gaps(series) -> Optional[np.ndarray]:
     arr[nans] = np.interp(idx[nans], idx[~nans], arr[~nans])
     return arr
 
-def _first_above(arr: np.ndarray, threshold: float) -> Optional[int]:
-    idxs = np.where(arr > threshold)[0]
-    return int(idxs[0]) if len(idxs) else None
-
-def _first_below(arr: np.ndarray, threshold: float) -> Optional[int]:
-    idxs = np.where(arr < threshold)[0]
-    return int(idxs[-1]) if len(idxs) else None
 
 def _confidence_flat(velocity: np.ndarray) -> float:
     """Alta confidenza se la velocità è vicina a zero (fase statica)."""

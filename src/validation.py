@@ -20,6 +20,8 @@ from src.config import (
     FEET_JITTER_FRAMES,
     CONFIDENCE_HIGH,
     CONFIDENCE_BORDERLINE,
+    LOCKOUT_KNEE_MIN_DEG,
+    LOCKOUT_HIP_MIN_DEG,
 )
 from src.segmentation import PhaseSegment, Phase
 
@@ -42,47 +44,49 @@ class CriterionResult:
 # ── Criterio 1: Profondità ───────────────────────────────────────────────────
 
 def check_depth(
+    hip_x: float,
     hip_y: float,
+    knee_x: float,
     knee_y: float,
     hip_visibility: float,
     knee_visibility: float,
 ) -> CriterionResult:
     """
-    Verifica che il piano superiore della coscia (approssimato dall'anca)
-    sia sotto il piano superiore del ginocchio nel frame di bottom.
+    Verifica che il piano superiore della coscia sia sotto il piano superiore
+    del ginocchio nel frame di bottom (criterio IPF parallela).
 
-    In coordinate pixel: Y cresce verso il basso, quindi
-    'anca sotto il ginocchio' = hip_y > knee_y.
+    Angolo della coscia rispetto all'orizzontale (vista laterale):
+      - 0°  = parallela esatta (anca allo stesso livello del ginocchio)
+      - > 0° = sotto parallela (valida IPF)
+      - < 0° = sopra parallela (non valida)
 
-    angle_deg: angolo relativo (positivo = sotto parallela).
+    In coordinate pixel Y cresce verso il basso, quindi
+    hip_y > knee_y significa anca più bassa del ginocchio.
     """
     confidence = min(hip_visibility, knee_visibility)
 
-    # Stima angolo (semplificata — sarà migliorata con keypoint coscia)
-    delta_px = hip_y - knee_y   # positivo = anca più bassa del ginocchio
+    dx = hip_x - knee_x
+    dy = hip_y - knee_y   # positivo = anca più bassa del ginocchio
 
-    # Convertiamo in "gradi equivalenti" rispetto alla parallela
-    # Per ora usiamo delta_px normalizzato — da calibrare con dati reali
-    # TODO: usare lunghezza coscia come riferimento di scala
-    angle_deg = float(np.degrees(np.arctan2(delta_px, 1)))  # placeholder
+    # Angolo della coscia rispetto all'orizzontale.
+    # abs(dx) evita ambiguità sul verso in cui l'atleta è rivolto.
+    angle_deg = float(np.degrees(np.arctan2(dy, abs(dx))))
 
     if confidence < CONFIDENCE_BORDERLINE:
         return CriterionResult(None, confidence, "Keypoint anca/ginocchio non visibili.")
 
-    below_parallel = delta_px > 0
+    below_parallel = dy > 0
     in_tolerance   = abs(angle_deg - DEPTH_THRESHOLD_DEG) <= DEPTH_TOLERANCE_DEG
 
     if in_tolerance:
-        # Zona borderline ±2°
         return CriterionResult(
             passed=None,
             confidence=confidence * 0.75,
             detail=f"Profondità al limite regolamentare ({angle_deg:+.1f}°). Non determinabile con certezza.",
         )
 
-    passed = below_parallel
     return CriterionResult(
-        passed=passed,
+        passed=below_parallel,
         confidence=confidence,
         detail=f"Angolo profondità: {angle_deg:+.1f}° rispetto parallela.",
     )
@@ -91,31 +95,59 @@ def check_depth(
 # ── Criterio 2 & 3: Lockout ──────────────────────────────────────────────────
 
 def check_lockout(
-    hip_y: float,
-    knee_y: float,
-    hip_visibility: float,
-    knee_visibility: float,
+    shoulder: tuple[float, float],
+    hip:      tuple[float, float],
+    knee:     tuple[float, float],
+    ankle:    tuple[float, float],
+    shoulder_vis: float,
+    hip_vis:      float,
+    knee_vis:     float,
+    ankle_vis:    float,
     phase_label: str = "",
 ) -> CriterionResult:
     """
-    Verifica estensione completa di anche e ginocchia.
-    Proxy: differenza verticale anca–ginocchio minimale (entrambi allineati).
-    TODO: aggiungere keypoint ginocchio angolo per misura diretta.
+    Verifica estensione completa di ginocchio e anca tramite angoli geometrici.
+
+    Angolo al ginocchio (hip→knee→ankle): gamba tesa ≈ 180°.
+    Angolo all'anca (shoulder→hip→knee): anca estesa ≈ 180°.
+
+    Soglie da config: LOCKOUT_KNEE_MIN_DEG, LOCKOUT_HIP_MIN_DEG.
     """
-    confidence = min(hip_visibility, knee_visibility)
+    confidence = min(shoulder_vis, hip_vis, knee_vis, ankle_vis)
 
     if confidence < CONFIDENCE_BORDERLINE:
         return CriterionResult(None, confidence, f"Keypoint non visibili ({phase_label}).")
 
-    # Proxy semplice — da raffinare con angolo ginocchio esplicito
-    delta = abs(hip_y - knee_y)
-    extended = delta < 50   # soglia pixel — da calibrare
+    knee_angle = _angle_3pt(hip,      knee, ankle)
+    hip_angle  = _angle_3pt(shoulder, hip,  knee)
 
-    return CriterionResult(
-        passed=extended,
-        confidence=confidence,
-        detail=f"Lockout {phase_label}: {'esteso' if extended else 'non esteso'}.",
+    knee_ok = knee_angle >= LOCKOUT_KNEE_MIN_DEG
+    hip_ok  = hip_angle  >= LOCKOUT_HIP_MIN_DEG
+    extended = knee_ok and hip_ok
+
+    detail = (
+        f"Lockout {phase_label}: "
+        f"ginocchio {knee_angle:.1f}° ({'ok' if knee_ok else 'non esteso'}), "
+        f"anca {hip_angle:.1f}° ({'ok' if hip_ok else 'non estesa'})."
     )
+    return CriterionResult(passed=extended, confidence=confidence, detail=detail)
+
+
+# ── helpers geometria ─────────────────────────────────────────────────────────
+
+def _angle_3pt(
+    a: tuple[float, float],
+    vertex: tuple[float, float],
+    b: tuple[float, float],
+) -> float:
+    """Angolo in gradi al vertice formato dal segmento a–vertex–b."""
+    v1 = np.array([a[0] - vertex[0], a[1] - vertex[1]], dtype=float)
+    v2 = np.array([b[0] - vertex[0], b[1] - vertex[1]], dtype=float)
+    norm = np.linalg.norm(v1) * np.linalg.norm(v2)
+    if norm < 1e-9:
+        return 0.0
+    cos_a = np.dot(v1, v2) / norm
+    return float(np.degrees(np.arccos(np.clip(cos_a, -1.0, 1.0))))
 
 
 # ── Criterio 4: Piedi ────────────────────────────────────────────────────────

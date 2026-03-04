@@ -24,10 +24,24 @@ MIN_FPS               = 30
 BAR_OCCLUSION_MAX_FRAMES = 10  # oltre questa soglia → metriche barra = N/D
 
 # ─────────────────────────────────────────────
-# VBT — curva Gonzalez-Badillo (squat)
-# %1RM = 100 * (1 - a * velocity^b)  — parametri pubblicati
+# Lockout thresholds (angoli geometrici)
+# ─────────────────────────────────────────────
+LOCKOUT_KNEE_MIN_DEG = 165.0   # angolo hip→knee→ankle per gamba tesa
+LOCKOUT_HIP_MIN_DEG  = 160.0   # angolo shoulder→hip→knee per anca estesa
+
+# ─────────────────────────────────────────────
+# Scala antropometrica (Drillis & Contini 1966)
+# ─────────────────────────────────────────────
+TIBIA_HEIGHT_RATIO = 0.246     # tibia / altezza totale
+
+# ─────────────────────────────────────────────
+# VBT — curva Gonzalez-Badillo & Sanchez-Medina (2010), back squat
+# %1RM = 100 * (1 - A * v^B)
+#
+# Parametri ricavati da regressione sui dati pubblicati (MPV → %1RM):
+#   ~90% @ 0.41 m/s | ~60% @ 0.96 m/s | ~30% @ 1.48 m/s
 # Errore atteso: ±8–12% su curva generica non calibrata
 # ─────────────────────────────────────────────
-VBT_A = 0.9886
-VBT_B = 0.2156
+VBT_A = 0.409
+VBT_B = 1.500
 VBT_ERROR_PCT = 10  # dichiarato nell'output

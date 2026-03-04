@@ -51,9 +51,12 @@ def print_report(result: AnalysisResult) -> None:
         print(sep)
         return
 
-    verdict = "VALIDA" if result.valid else "NON VALIDA"
-    if result.confidence < 0.85:
+    if not result.valid:
+        verdict = "NON VALIDA"
+    elif result.confidence < 0.85:
         verdict = f"BORDERLINE (confidenza {result.confidence:.0%})"
+    else:
+        verdict = "VALIDA"
 
     print(f"\nRISULTATO: {verdict}")
     print(sep)
