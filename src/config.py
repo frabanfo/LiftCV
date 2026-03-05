@@ -8,7 +8,7 @@ CONFIDENCE_BORDERLINE = 0.60   # "borderline — non determinabile con certezza"
 # ─────────────────────────────────────────────
 # IPF criteria parameters
 # ─────────────────────────────────────────────
-DEPTH_THRESHOLD_DEG   = -6.0   # Compensazione offset anatomico: MediaPipe usa il
+DEPTH_THRESHOLD_DEG   = -8.0   # Compensazione offset anatomico: MediaPipe usa il
                                 # centro del giunto (anca e ginocchio), ma il criterio
                                 # IPF confronta la piega dell'anca con la sommità della
                                 # rotula (~3-5 cm sopra il centro del ginocchio).

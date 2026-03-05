@@ -141,6 +141,10 @@ def main():
     final_lockout = _check_lockout_at(pose_frames, lockout_seg.start_frame, "finale")
     feet_result   = _check_feet_series(pose_frames, setup_seg, descent_seg.start_frame, ascent_seg.end_frame)
 
+    if args.debug:
+        _debug_depth(pose_frames, bottom_seg.start_frame)
+        _debug_feet(pose_frames, setup_seg, descent_seg.start_frame, ascent_seg.end_frame)
+
     # ── Metriche ─────────────────────────────────────────────────────────────
     metrics = compute_metrics(
         bar_y_px=bar_y_px,
@@ -192,44 +196,26 @@ def _detect_bar(
     """
     Stima la posizione della barra nel frame corrente.
 
-    Strategia:
-    1. Calcola il punto medio dei polsi (proxy barra in back-squat).
-    2. Prova detect_bar_in_roi (colore cromato) in una ROI intorno a quel punto.
-    3. Se fallisce ma i polsi sono visibili, usa il loro punto medio come fallback.
-    4. Se i polsi non sono visibili, usa il punto medio delle spalle.
+    Strategia per ripresa laterale back-squat:
+    Usa la spalla del lato dominante (il lato vicino alla telecamera) come proxy.
+    La spalla è sempre visibile in ripresa laterale e la sua Y segue la barra con
+    offset costante → corretto per segmentazione, ROM, velocità (tutti calcoli Δ).
+
+    Il color detection cromatico precedente è stato rimosso: con una ripresa
+    laterale tipica produceva <50% di rilevazioni valide e 789px di range spurio
+    a causa di match su sfondo/abbigliamento.
     """
     if pf is None:
         return None
 
-    lw = pf.keypoints.get("left_wrist")
-    rw = pf.keypoints.get("right_wrist")
-    vis_lw = pf.visibility.get("left_wrist", 0.0)
-    vis_rw = pf.visibility.get("right_wrist", 0.0)
+    side = _dominant_side(pf, ["shoulder", "hip"])
+    shoulder_kp  = pf.keypoints.get(f"{side}_shoulder")
+    shoulder_vis = pf.visibility.get(f"{side}_shoulder", 0.0)
 
-    if lw is not None and rw is not None:
-        mx, my = (lw[0] + rw[0]) / 2, (lw[1] + rw[1]) / 2
-        wrist_visible = (vis_lw + vis_rw) / 2 > 0.5
-    else:
-        # Fallback: punto medio spalle
-        ls = pf.keypoints.get("left_shoulder")
-        rs = pf.keypoints.get("right_shoulder")
-        if ls is None or rs is None:
-            return None
-        mx, my = (ls[0] + rs[0]) / 2, (ls[1] + rs[1]) / 2
-        wrist_visible = False
+    if shoulder_kp is None or shoulder_vis < 0.5:
+        return None
 
-    r = 60
-    roi = (
-        max(0, int(mx - r)),
-        max(0, int(my - r)),
-        min(width  - max(0, int(mx - r)), 2 * r),
-        min(height - max(0, int(my - r)), 2 * r),
-    )
-    detected = detect_bar_in_roi(frame_bgr, roi)
-    if detected is not None:
-        return detected
-
-    return (mx, my) if wrist_visible else None
+    return (shoulder_kp[0], shoulder_kp[1])
 
 
 def _dominant_side(pf: PoseFrame, landmarks: list[str]) -> str:
@@ -446,6 +432,79 @@ def _print_rejection(reason: str, bar_weight_kg: Optional[float] = None) -> None
         rejection_reason=reason,
     )
     print_report(result)
+
+
+def _debug_depth(pose_frames: list[Optional[PoseFrame]], bottom_frame: int) -> None:
+    """Stampa i landmark anca/ginocchio in ogni frame della finestra di depth check."""
+    print(f"\n[DEBUG] Depth check — finestra frame {max(0, bottom_frame-3)}–{min(len(pose_frames)-1, bottom_frame+3)}:")
+    for fi in range(max(0, bottom_frame - 3), min(len(pose_frames), bottom_frame + 4)):
+        pf = pose_frames[fi]
+        if pf is None:
+            print(f"  frame {fi:3d}  pose=None")
+            continue
+        side = _dominant_side(pf, ["hip", "knee"])
+        hip_kp  = pf.keypoints.get(f"{side}_hip")
+        knee_kp = pf.keypoints.get(f"{side}_knee")
+        hv = pf.visibility.get(f"{side}_hip",  0.0)
+        kv = pf.visibility.get(f"{side}_knee", 0.0)
+        if hip_kp and knee_kp:
+            dy = hip_kp[1] - knee_kp[1]
+            dx = hip_kp[0] - knee_kp[0]
+            ang = float(np.degrees(np.arctan2(dy, abs(dx))))
+            marker = " ← bottom" if fi == bottom_frame else ""
+            print(
+                f"  frame {fi:3d}  side={side}"
+                f"  hip=({hip_kp[0]:.0f},{hip_kp[1]:.0f}) vis={hv:.2f}"
+                f"  knee=({knee_kp[0]:.0f},{knee_kp[1]:.0f}) vis={kv:.2f}"
+                f"  dy={dy:+.0f}  angle={ang:+.1f}°{marker}"
+            )
+        else:
+            print(f"  frame {fi:3d}  side={side}  keypoint mancante")
+
+
+def _debug_feet(
+    pose_frames: list[Optional[PoseFrame]],
+    setup_seg,
+    rep_start: int,
+    rep_end: int,
+) -> None:
+    """Stampa lo spostamento del tallone frame per frame durante la fase di movimento."""
+    side = "left"
+    for pf in pose_frames:
+        if pf is not None:
+            side = _dominant_side(pf, ["heel"])
+            break
+
+    heel_key = f"{side}_heel"
+    heel_y_all = [
+        pf.keypoints[heel_key][1] if pf is not None and heel_key in pf.keypoints else None
+        for pf in pose_frames
+    ]
+    heel_vis_all = [
+        pf.visibility.get(heel_key, 0.0) if pf is not None else 0.0
+        for pf in pose_frames
+    ]
+
+    ref_end   = setup_seg.end_frame
+    ref_start = max(setup_seg.start_frame, ref_end - 4)
+    valid_ref = [v for v in heel_y_all[ref_start : ref_end + 1] if v is not None]
+    ref_y = float(np.median(valid_ref)) if valid_ref else None
+
+    print(f"\n[DEBUG] Feet (heel {side}) — ref_y={ref_y:.0f}px  frame {rep_start}–{rep_end}:")
+    if ref_y is None:
+        print("  riferimento non disponibile")
+        return
+    for fi in range(rep_start, rep_end + 1):
+        y   = heel_y_all[fi]
+        vis = heel_vis_all[fi]
+        if y is None:
+            delta = "N/D"
+            flag  = ""
+        else:
+            d = ref_y - y          # positivo = tallone salito
+            delta = f"{d:+.0f}px"
+            flag  = "  ← LIFT" if d > 15 and vis >= CONFIDENCE_BORDERLINE else ""
+        print(f"  frame {fi:3d}  heel_y={str(round(y)) if y else 'N/D':>6}  Δ={delta:>8}  vis={vis:.2f}{flag}")
 
 
 def _ask_float(prompt: str, required: bool) -> float | None:
