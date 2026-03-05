@@ -52,16 +52,18 @@ def check_depth(
     knee_visibility: float,
 ) -> CriterionResult:
     """
-    Verifica che il piano superiore della coscia sia sotto il piano superiore
-    del ginocchio nel frame di bottom (criterio IPF parallela).
+    Verifica che la piega dell'anca sia sotto la sommità della rotula
+    nel frame di bottom (criterio IPF parallela).
 
     Angolo della coscia rispetto all'orizzontale (vista laterale):
-      - 0°  = parallela esatta (anca allo stesso livello del ginocchio)
-      - > 0° = sotto parallela (valida IPF)
-      - < 0° = sopra parallela (non valida)
+      - 0°  = anca geometricamente allo stesso livello del ginocchio
+      - > 0° = sotto parallela geometrica
+      - < 0° = sopra parallela geometrica
 
-    In coordinate pixel Y cresce verso il basso, quindi
-    hip_y > knee_y significa anca più bassa del ginocchio.
+    Poiché MediaPipe restituisce il centro del giunto (non la piega dell'anca
+    né la sommità della rotula), l'angolo a parallela IPF reale è circa -4° a -6°.
+    DEPTH_THRESHOLD_DEG compensa questo offset: l'atleta passa il check quando
+    angle_deg >= DEPTH_THRESHOLD_DEG (cioè alla parallela IPF o più in basso).
     """
     confidence = min(hip_visibility, knee_visibility)
 
@@ -75,7 +77,9 @@ def check_depth(
     if confidence < CONFIDENCE_BORDERLINE:
         return CriterionResult(None, confidence, "Keypoint anca/ginocchio non visibili.")
 
-    below_parallel = dy > 0
+    # L'atleta è alla/sotto parallela IPF quando l'angolo supera la soglia
+    # (che include la compensazione per l'offset anatomico landmark-rotula).
+    below_parallel = angle_deg >= DEPTH_THRESHOLD_DEG
     in_tolerance   = abs(angle_deg - DEPTH_THRESHOLD_DEG) <= DEPTH_TOLERANCE_DEG
 
     if in_tolerance:

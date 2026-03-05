@@ -48,9 +48,13 @@ def compute_metrics(
     setup_seg   = segmentation.get(Phase.SETUP)
 
     # ── ROM ──────────────────────────────────────────────────────────────────
+    # Reference: last 5 frames of SETUP = standing lockout just before descent.
+    # Using the full SETUP median would include walkout (bar on J-hooks = higher
+    # position), inflating ROM.
     rom_m = None
     if setup_seg and bottom_seg and px_per_meter:
-        y_setup  = _median_valid(bar_y_px[setup_seg.start_frame:setup_seg.end_frame + 1])
+        ref_start = max(setup_seg.start_frame, setup_seg.end_frame - 4)
+        y_setup  = _median_valid(bar_y_px[ref_start:setup_seg.end_frame + 1])
         y_bottom = _median_valid(bar_y_px[bottom_seg.start_frame:bottom_seg.start_frame + 1])
         if y_setup is not None and y_bottom is not None:
             rom_px = abs(y_bottom - y_setup)

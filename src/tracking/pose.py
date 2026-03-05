@@ -39,6 +39,8 @@ LANDMARK_INDICES: dict[str, int] = {
     "right_ankle":    28,
     "left_wrist":     15,
     "right_wrist":    16,
+    "left_heel":      29,
+    "right_heel":     30,
 }
 
 

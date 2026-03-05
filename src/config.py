@@ -8,7 +8,13 @@ CONFIDENCE_BORDERLINE = 0.60   # "borderline — non determinabile con certezza"
 # ─────────────────────────────────────────────
 # IPF criteria parameters
 # ─────────────────────────────────────────────
-DEPTH_THRESHOLD_DEG   = 0.0    # 0° = piano coscia == piano ginocchio (parallela)
+DEPTH_THRESHOLD_DEG   = -6.0   # Compensazione offset anatomico: MediaPipe usa il
+                                # centro del giunto (anca e ginocchio), ma il criterio
+                                # IPF confronta la piega dell'anca con la sommità della
+                                # rotula (~3-5 cm sopra il centro del ginocchio).
+                                # A parallela IPF reale, l'angolo calcolato è circa
+                                # -4° a -6°. Soglia -6° = valido quando alla parallela
+                                # IPF o più in profondità.
 DEPTH_TOLERANCE_DEG   = 2.0    # ±2° → zona borderline, non KO automatico
 
 FEET_JITTER_FRAMES    = 3      # frame consecutivi minimi per flag sollevamento piedi

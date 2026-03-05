@@ -127,6 +127,8 @@ def main():
     bottom_seg  = seg.get(Phase.BOTTOM)
     setup_seg   = seg.get(Phase.SETUP)
     lockout_seg = seg.get(Phase.LOCKOUT)
+    descent_seg = seg.get(Phase.DESCENT)
+    ascent_seg  = seg.get(Phase.ASCENT)
 
     # ── Calibrazione scala ────────────────────────────────────────────────────
     px_per_meter = _compute_px_per_meter(pose_frames, setup_seg, height_m)
@@ -137,7 +139,7 @@ def main():
     depth_result, depth_angle = _check_depth_at(pose_frames, bottom_seg.start_frame)
     init_lockout  = _check_lockout_at(pose_frames, setup_seg.end_frame,    "iniziale")
     final_lockout = _check_lockout_at(pose_frames, lockout_seg.start_frame, "finale")
-    feet_result   = _check_feet_series(pose_frames, setup_seg)
+    feet_result   = _check_feet_series(pose_frames, setup_seg, descent_seg.start_frame, ascent_seg.end_frame)
 
     # ── Metriche ─────────────────────────────────────────────────────────────
     metrics = compute_metrics(
@@ -279,25 +281,44 @@ def _check_depth_at(
     pose_frames: list[Optional[PoseFrame]],
     frame_idx: int,
 ) -> tuple[CriterionResult, Optional[float]]:
-    """Profondità al frame di bottom. Ritorna (CriterionResult, depth_angle_deg)."""
-    pf = pose_frames[frame_idx] if frame_idx < len(pose_frames) else None
-    if pf is None:
+    """
+    Profondità in una finestra ±3 frame intorno al bottom.
+    Tra i frame con confidenza >= BORDERLINE, sceglie quello con massima profondità
+    (hip_y - knee_y più grande = anca più bassa).
+    Questo evita di valutare un frame marginalmente più alto del bottom solo perché
+    ha keypoint leggermente più certi.
+    """
+    candidates: list[tuple[float, float, CriterionResult, float]] = []  # (dy, conf, result, angle)
+
+    for fi in range(max(0, frame_idx - 3), min(len(pose_frames), frame_idx + 4)):
+        pf = pose_frames[fi]
+        if pf is None:
+            continue
+        side     = _dominant_side(pf, ["hip", "knee"])
+        hip_kp   = pf.keypoints.get(f"{side}_hip")
+        knee_kp  = pf.keypoints.get(f"{side}_knee")
+        hip_vis  = pf.visibility.get(f"{side}_hip",  0.0)
+        knee_vis = pf.visibility.get(f"{side}_knee", 0.0)
+        if hip_kp is None or knee_kp is None:
+            continue
+        result    = check_depth(hip_kp[0], hip_kp[1], knee_kp[0], knee_kp[1], hip_vis, knee_vis)
+        dx        = hip_kp[0] - knee_kp[0]
+        dy        = hip_kp[1] - knee_kp[1]
+        angle_deg = float(np.degrees(np.arctan2(dy, abs(dx))))
+        candidates.append((dy, min(hip_vis, knee_vis), result, angle_deg))
+
+    if not candidates:
         return CriterionResult(None, 0.0, "Pose non rilevata al bottom."), None
 
-    side     = _dominant_side(pf, ["hip", "knee"])
-    hip_kp   = pf.keypoints.get(f"{side}_hip")
-    knee_kp  = pf.keypoints.get(f"{side}_knee")
-    hip_vis  = pf.visibility.get(f"{side}_hip",  0.0)
-    knee_vis = pf.visibility.get(f"{side}_knee", 0.0)
+    # Tra i frame con confidence sufficiente, prendi quello più profondo.
+    # Se nessuno supera la soglia, ricadi sul frame con confidence massima.
+    adequate = [(dy, conf, res, ang) for dy, conf, res, ang in candidates if conf >= CONFIDENCE_BORDERLINE]
+    if adequate:
+        _, _, best_result, best_angle = max(adequate, key=lambda x: x[0])
+    else:
+        _, _, best_result, best_angle = max(candidates, key=lambda x: x[1])
 
-    if hip_kp is None or knee_kp is None:
-        return CriterionResult(None, 0.0, "Keypoint anca/ginocchio assenti al bottom."), None
-
-    result    = check_depth(hip_kp[0], hip_kp[1], knee_kp[0], knee_kp[1], hip_vis, knee_vis)
-    dx        = hip_kp[0] - knee_kp[0]
-    dy        = hip_kp[1] - knee_kp[1]
-    angle_deg = float(np.degrees(np.arctan2(dy, abs(dx))))
-    return result, angle_deg
+    return best_result, best_angle
 
 
 def _check_lockout_at(
@@ -333,44 +354,55 @@ def _check_lockout_at(
 def _check_feet_series(
     pose_frames: list[Optional[PoseFrame]],
     setup_seg,
+    rep_start: int,
+    rep_end: int,
 ) -> CriterionResult:
     """
-    Verifica contatto continuo piedi–pedana su tutta la ripetizione.
-    Usa la posizione mediana della caviglia nel setup come riferimento.
+    Verifica contatto continuo piedi–pedana durante la fase di movimento
+    (dalla discesa alla fine dell'ascesa). Non include walkout e re-rack,
+    dove l'atleta alza i piedi per definizione.
+
+    Riferimento Y: ultimi 5 frame del setup, quando l'atleta è già fermo
+    nella sua stance (evita distorsioni da posizioni di walkout).
     """
-    # Determina lato dominante dalla prima frame valida
+    # Usa il landmark heel (calcagno) invece di ankle: il calcagno resta
+    # fisso a terra durante la dorsiflessione, mentre il centro del giunto
+    # della caviglia si sposta anche con il piede ben piantato.
     side = "left"
     for pf in pose_frames:
         if pf is not None:
-            side = _dominant_side(pf, ["ankle"])
+            side = _dominant_side(pf, ["heel"])
             break
 
-    ankle_key = f"{side}_ankle"
-    ankle_y_all  = [
-        pf.keypoints[ankle_key][1]
-        if pf is not None and ankle_key in pf.keypoints else None
+    heel_key = f"{side}_heel"
+    heel_y_all = [
+        pf.keypoints[heel_key][1]
+        if pf is not None and heel_key in pf.keypoints else None
         for pf in pose_frames
     ]
-    ankle_vis_all = [
-        pf.visibility.get(ankle_key, 0.0) if pf is not None else 0.0
+    heel_vis_all = [
+        pf.visibility.get(heel_key, 0.0) if pf is not None else 0.0
         for pf in pose_frames
     ]
 
-    # Riferimento Y dal setup
-    setup_range = ankle_y_all[setup_seg.start_frame : setup_seg.end_frame + 1]
-    valid_setup = [v for v in setup_range if v is not None]
-    if not valid_setup:
-        return CriterionResult(None, 0.0, "Caviglia non rilevata nel setup.")
+    # Riferimento Y dagli ultimi 5 frame del setup (atleta fermo in stance)
+    ref_end   = setup_seg.end_frame
+    ref_start = max(setup_seg.start_frame, ref_end - 4)
+    valid_ref = [v for v in heel_y_all[ref_start : ref_end + 1] if v is not None]
+    if not valid_ref:
+        return CriterionResult(None, 0.0, "Tallone non rilevato nel setup.")
 
-    initial_ankle_y = float(np.median(valid_setup))
+    initial_heel_y = float(np.median(valid_ref))
 
-    # Sostituisce i None con il riferimento (frame occlusi non innescano falsi positivi)
-    ankle_y_filled = [y if y is not None else initial_ankle_y for y in ankle_y_all]
+    # Controlla solo la fase di movimento (discesa → fine ascesa)
+    heel_y_rep  = heel_y_all[rep_start : rep_end + 1]
+    heel_vis_rep = heel_vis_all[rep_start : rep_end + 1]
+    heel_y_filled = [y if y is not None else initial_heel_y for y in heel_y_rep]
 
     return check_feet(
-        ankle_y_series=ankle_y_filled,
-        initial_ankle_y=initial_ankle_y,
-        visibility_series=ankle_vis_all,
+        ankle_y_series=heel_y_filled,
+        initial_ankle_y=initial_heel_y,
+        visibility_series=heel_vis_rep,
     )
 
 
