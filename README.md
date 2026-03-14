@@ -1,42 +1,78 @@
+# LiftCV — Squat Video Analysis
 
-# Lift CV – Analisi Squat
+LiftCV is a computer vision pipeline that analyzes a **single squat repetition** from a lateral video and extracts biomechanical metrics and validity checks.
+
+The project is a **proof-of-concept tool for powerlifting analysis using computer vision**.
 
 ---
 
-## Obiettivo
-Analizzare automaticamente **una singola ripetizione di squat** da video laterale.  
-Fornisce validità della ripetizione e metriche quantitative come ROM, velocità, deviazione della barra e stima %1RM.
+## Features
+
+LiftCV evaluates a squat repetition and returns:
+
+**Validity checks**
+
+- Squat depth  
+- Initial lockout  
+- Final lockout  
+- Foot stability  
+
+**Kinematic metrics**
+
+- Bar range of motion (ROM)  
+- Mean concentric velocity  
+- Peak velocity  
+- Horizontal bar deviation  
+- Estimated %1RM (velocity-based)
 
 ---
 
 ## Input
-- Video laterale dello squat (corpo e barra visibili)  
-- Peso sul bilanciere (opzionale)  
-- Peso corporeo / storico 1RM (opzionali)
+
+The system expects:
+
+| Input | Description | Required |
+|------|-------------|---------|
+| Squat video | Lateral view with athlete and bar visible | mandatory |
+| Barbell weight | Used for intensity estimation | mandatory |
+| Athlete height | Improves scale normalization | mandatory |
+| Bodyweight | Optional contextual metric | optional |
+| Historical 1RM | Optional intensity reference | optional |
 
 ---
 
 ## Output
-- Validità della ripetizione  
-- Metriche quantitative  
-- Report sintetico con limiti dichiarati
+
+LiftCV produces a structured report including:
+
+- Rep validity assessment  
+- Computed kinematic metrics  
+- Estimated training intensity  
+- Confidence notes and limitations  
 
 ---
 
-## Vincoli
-- Analisi di **una sola ripetizione**  
-- Solo squat, monocamera laterale  
-- Nessun feedback in tempo reale  
-- Alcune metriche non osservabili (es. valgismo ginocchio)
+## Constraints
+
+Current system limitations:
+
+- **Single repetition per video**
+- **Back squat only**
+- **Single lateral camera**
+- **Offline analysis only**
+
+Some biomechanical variables cannot be inferred from monocular video, including:
+
+- Knee valgus
+- Foot pressure distribution
+- Exact bar placement
+- Lumbar stability
 
 ---
 
-## Stack tecnico
-Python + MediaPipe Pose + OpenCV + NumPy/SciPy
+## Tech Stack
 
----
-
-## Roadmap futura
-- Panca piana  
-- Serie multiple e trend %1RM  
-- Stacco e multi-camera
+- Python  
+- MediaPipe Pose  
+- OpenCV  
+- NumPy / SciPy  
