@@ -153,7 +153,7 @@ def main():
         search_start=lockout_seg.start_frame,
         search_end=lockout_seg.end_frame,
     )
-    feet_result   = _check_feet_series(pose_frames, setup_seg, descent_seg.start_frame, ascent_seg.end_frame)
+    feet_result   = _check_feet_series(pose_frames, setup_seg, descent_seg.start_frame, ascent_seg.end_frame, px_per_meter=px_per_meter)
 
     if args.debug:
         _debug_depth(pose_frames, bottom_seg.start_frame, descent_seg.start_frame, ascent_seg.end_frame)
@@ -409,18 +409,16 @@ def _check_feet_series(
     setup_seg,
     rep_start: int,
     rep_end: int,
+    px_per_meter: Optional[float] = None,
 ) -> CriterionResult:
     """
-    Verifica contatto continuo piedi–pedana durante la fase di movimento
-    (dalla discesa alla fine dell'ascesa). Non include walkout e re-rack,
-    dove l'atleta alza i piedi per definizione.
+    Verifica che i piedi non si sollevino durante la fase di movimento
+    (dalla discesa alla fine dell'ascesa). Non include walkout e re-rack.
 
-    Riferimento Y: ultimi 5 frame del setup, quando l'atleta è già fermo
-    nella sua stance (evita distorsioni da posizioni di walkout).
+    Riferimento Y: mediana del tallone sull'intera fase di setup (non solo
+    gli ultimi 5 frame), per robustezza quando la pose non è rilevata in
+    alcuni frame iniziali.
     """
-    # Usa il landmark heel (calcagno) invece di ankle: il calcagno resta
-    # fisso a terra durante la dorsiflessione, mentre il centro del giunto
-    # della caviglia si sposta anche con il piede ben piantato.
     side = "left"
     for pf in pose_frames:
         if pf is not None:
@@ -438,24 +436,29 @@ def _check_feet_series(
         for pf in pose_frames
     ]
 
-    # Riferimento Y dagli ultimi 5 frame del setup (atleta fermo in stance)
-    ref_end   = setup_seg.end_frame
-    ref_start = max(setup_seg.start_frame, ref_end - 4)
-    valid_ref = [v for v in heel_y_all[ref_start : ref_end + 1] if v is not None]
+    # Riferimento Y: mediana sull'intera fase di setup (atleta in stance).
+    # Fallback: primi frame della discesa se il setup è privo di rilevazioni.
+    valid_ref = [
+        v for v in heel_y_all[setup_seg.start_frame : setup_seg.end_frame + 1]
+        if v is not None
+    ]
+    if not valid_ref:
+        fallback_end = min(len(heel_y_all), rep_start + 5)
+        valid_ref = [v for v in heel_y_all[rep_start:fallback_end] if v is not None]
     if not valid_ref:
         return CriterionResult(None, 0.0, "Tallone non rilevato nel setup.")
 
     initial_heel_y = float(np.median(valid_ref))
 
-    # Controlla solo la fase di movimento (discesa → fine ascesa)
-    heel_y_rep  = heel_y_all[rep_start : rep_end + 1]
-    heel_vis_rep = heel_vis_all[rep_start : rep_end + 1]
+    heel_y_rep    = heel_y_all[rep_start : rep_end + 1]
+    heel_vis_rep  = heel_vis_all[rep_start : rep_end + 1]
     heel_y_filled = [y if y is not None else initial_heel_y for y in heel_y_rep]
 
     return check_feet(
         ankle_y_series=heel_y_filled,
         initial_ankle_y=initial_heel_y,
         visibility_series=heel_vis_rep,
+        px_per_meter=px_per_meter,
     )
 
 
@@ -557,15 +560,19 @@ def _debug_feet(
         for pf in pose_frames
     ]
 
-    ref_end   = setup_seg.end_frame
-    ref_start = max(setup_seg.start_frame, ref_end - 4)
-    valid_ref = [v for v in heel_y_all[ref_start : ref_end + 1] if v is not None]
+    # Mirror the same reference logic as _check_feet_series
+    valid_ref = [v for v in heel_y_all[setup_seg.start_frame : setup_seg.end_frame + 1] if v is not None]
+    if not valid_ref:
+        fallback_end = min(len(heel_y_all), rep_start + 5)
+        valid_ref = [v for v in heel_y_all[rep_start:fallback_end] if v is not None]
     ref_y = float(np.median(valid_ref)) if valid_ref else None
 
-    print(f"\n[DEBUG] Feet (heel {side}) — ref_y={ref_y:.0f}px  frame {rep_start}–{rep_end}:")
     if ref_y is None:
-        print("  riferimento non disponibile")
+        print(f"\n[DEBUG] Feet (heel {side}) — riferimento non disponibile (frame {rep_start}-{rep_end})")
         return
+
+    lift_thresh_px = 30  # approx; exact value depends on px_per_meter
+    print(f"\n[DEBUG] Feet (heel {side}) — ref_y={ref_y:.0f}px  frame {rep_start}–{rep_end}  (soglia ~{lift_thresh_px}px):")
     for fi in range(rep_start, rep_end + 1):
         y   = heel_y_all[fi]
         vis = heel_vis_all[fi]
@@ -575,8 +582,8 @@ def _debug_feet(
         else:
             d = ref_y - y          # positivo = tallone salito
             delta = f"{d:+.0f}px"
-            flag  = "  ← LIFT" if d > 15 and vis >= CONFIDENCE_BORDERLINE else ""
-        print(f"  frame {fi:3d}  heel_y={str(round(y)) if y else 'N/D':>6}  Δ={delta:>8}  vis={vis:.2f}{flag}")
+            flag  = "  <- LIFT" if d > lift_thresh_px and vis >= CONFIDENCE_BORDERLINE else ""
+        print(f"  frame {fi:3d}  heel_y={str(round(y)) if y else 'N/D':>6}  delta={delta:>8}  vis={vis:.2f}{flag}")
 
 
 def _ask_float(prompt: str, required: bool) -> float | None:

@@ -20,6 +20,8 @@ from src.config import (
     DEPTH_THRESHOLD_DEG,
     DEPTH_TOLERANCE_DEG,
     FEET_JITTER_FRAMES,
+    FEET_LIFT_THRESHOLD_M,
+    FEET_LIFT_THRESHOLD_PX,
     CONFIDENCE_HIGH,
     CONFIDENCE_BORDERLINE,
     LOCKOUT_KNEE_MIN_DEG,
@@ -186,23 +188,35 @@ def check_feet(
     ankle_y_series: list[float],
     initial_ankle_y: float,
     visibility_series: list[float],
+    px_per_meter: Optional[float] = None,
 ) -> CriterionResult:
     """
-    Verifica contatto continuo piedi–pedana per tutta la ripetizione.
-    Sollevo rilevato se ankle_y scende di più di una soglia per >= FEET_JITTER_FRAMES consecutivi.
+    Verifica che i piedi non si sollievino dalla pedana durante la ripetizione.
 
-    ankle_y_series: posizione Y della caviglia per ogni frame (Y decresce se si alza).
-    initial_ankle_y: posizione di riferimento dal setup.
+    Rileva solo sollevamenti chiari (≥ FEET_LIFT_THRESHOLD_M = 5 cm se calibrato,
+    altrimenti FEET_LIFT_THRESHOLD_PX pixel), per almeno FEET_JITTER_FRAMES
+    frame consecutivi con visibilità sufficiente.
+
+    La soglia permissiva evita falsi positivi da:
+    - jitter dei landmark su scarpe spesse
+    - dorsiflessione profonda in stance larga
+    - legger movimenti del tallone durante la discesa
+
+    ankle_y_series: Y del tallone per frame (Y cresce verso il basso in pixel).
+    initial_ankle_y: riferimento dal setup (atleta fermo in stance).
     """
-    lift_threshold_px = 15   # pixel — da calibrare
-    n = len(ankle_y_series)
+    lift_threshold_px = (
+        FEET_LIFT_THRESHOLD_M * px_per_meter
+        if px_per_meter is not None
+        else FEET_LIFT_THRESHOLD_PX
+    )
 
     consecutive = 0
     for i, y in enumerate(ankle_y_series):
         if visibility_series[i] < CONFIDENCE_BORDERLINE:
             consecutive = 0
             continue
-        if initial_ankle_y - y > lift_threshold_px:   # Y scende = piede si alza
+        if initial_ankle_y - y > lift_threshold_px:   # Y decresce = piede si alza
             consecutive += 1
             if consecutive >= FEET_JITTER_FRAMES:
                 return CriterionResult(
@@ -213,5 +227,9 @@ def check_feet(
         else:
             consecutive = 0
 
-    avg_visibility = float(np.mean(visibility_series)) if visibility_series else 0.0
+    # Confidence = average visibility only over frames where heel was actually detected.
+    # Frames with vis=0 (occluded/pose missing) are skipped to avoid artificially
+    # deflating the confidence when the foot was not visible but also not seen lifting.
+    visible_vis = [v for v in visibility_series if v >= CONFIDENCE_BORDERLINE]
+    avg_visibility = float(np.mean(visible_vis)) if visible_vis else float(np.mean(visibility_series)) if visibility_series else 0.0
     return CriterionResult(passed=True, confidence=avg_visibility)

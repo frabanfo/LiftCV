@@ -23,7 +23,13 @@ DEPTH_TOLERANCE_M     = 0.02   # ±2 cm → zona borderline attorno alla soglia
 DEPTH_THRESHOLD_DEG   = -8.0
 DEPTH_TOLERANCE_DEG   = 2.0
 
-FEET_JITTER_FRAMES    = 3      # frame consecutivi minimi per flag sollevamento piedi
+FEET_JITTER_FRAMES       = 3    # frame consecutivi minimi per flag sollevamento piedi
+FEET_LIFT_THRESHOLD_M    = 0.15 # soglia lift: solo sollevamenti netti (≥15 cm apparenti).
+                                 # Il landmark heel di MediaPipe è al calcagno posteriore:
+                                 # la dorsiflessione profonda (accosciata) può causare uno
+                                 # spostamento apparente di 5-12 cm senza che il piede lasci
+                                 # il suolo. Soglia 15 cm separa l'artefatto da un vero lift.
+FEET_LIFT_THRESHOLD_PX   = 70   # fallback pixel se px_per_meter non disponibile (~15 cm)
 
 # ─────────────────────────────────────────────
 # Video input requirements
