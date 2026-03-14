@@ -31,7 +31,7 @@ from scripts.analyze import analyze_video
 from src.io.output import AnalysisResult
 
 
-# ── Strutture dati ────────────────────────────────────────────────────────────
+# -- Strutture dati ------------------------------------------------------------
 
 @dataclass
 class VideoLabel:
@@ -58,7 +58,7 @@ class VideoResult:
     def criterion_match(self, criterion: str) -> Optional[bool]:
         """
         Confronta il valore GT con quello ottenuto dalla pipeline.
-        Ritorna True (PASS), False (FAIL), None (saltato — GT è null o result è None).
+        Ritorna True (PASS), False (FAIL), None (saltato -- GT è null o result è None).
         """
         gt_val = getattr(self.label, criterion)
         if gt_val is None or self.result is None:
@@ -69,10 +69,10 @@ class VideoResult:
         return gt_val == got_val
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ----------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="LiftCV — Test pipeline integrazione")
+    parser = argparse.ArgumentParser(description="LiftCV -- Test pipeline integrazione")
     parser.add_argument("--gt-dir",  default="gt",  help="Directory contenente labels.json e i video (default: gt/)")
     parser.add_argument("--debug",   action="store_true", help="Abilita debug output della pipeline per ogni video")
     parser.add_argument("--verbose", action="store_true", help="Mostra output analisi (altrimenti soppresso)")
@@ -117,26 +117,26 @@ def main():
 
     # Conta quanti hanno etichette compilate
     labeled = [l for l in labels if l.valid is not None]
-    print(f"\nLiftCV — Test Pipeline")
-    print(f"{'─' * 60}")
+    print(f"\nLiftCV -- Test Pipeline")
+    print(f"{'-' * 60}")
     print(f"GT dir:        {gt_dir}")
     print(f"Video totali:  {len(labels)}  |  Annotati: {len(labeled)}  |  Da annotare: {len(labels) - len(labeled)}")
-    print(f"Parametri:     {bar_weight_kg:.0f} kg  ×  {height_m:.2f} m")
-    print(f"{'─' * 60}\n")
+    print(f"Parametri:     {bar_weight_kg:.0f} kg  x  {height_m:.2f} m")
+    print(f"{'-' * 60}\n")
 
-    # ── Esegui pipeline su ogni video ─────────────────────────────────────────
+    # -- Esegui pipeline su ogni video -----------------------------------------
     results: list[VideoResult] = []
     for label in labels:
         video_path = gt_dir / label.filename
         prefix = f"[{label.filename}]"
 
         if not video_path.exists():
-            print(f"{prefix}  FILE NON TROVATO — saltato")
+            print(f"{prefix}  FILE NON TROVATO -- saltato")
             results.append(VideoResult(filename=label.filename, label=label, result=None, error="file not found"))
             continue
 
         if label.valid is None:
-            print(f"{prefix}  etichetta non compilata — saltato")
+            print(f"{prefix}  etichetta non compilata -- saltato")
             results.append(VideoResult(filename=label.filename, label=label, result=None, error="not labeled"))
             continue
 
@@ -153,13 +153,13 @@ def main():
             print(f" ERRORE: {e}")
             results.append(VideoResult(filename=label.filename, label=label, result=None, error=str(e)))
 
-    # ── Tabella risultati ─────────────────────────────────────────────────────
+    # -- Tabella risultati -----------------------------------------------------
     criteria = ["valid", "depth_ok", "initial_lockout_ok", "final_lockout_ok", "feet_ok"]
     col_w = 8  # width per colonna criterio
 
     header_labels = ["valid", "depth", "init_lo", "fin_lo", "feet"]
     header = f"{'Video':<18}" + "".join(f"{h:^{col_w}}" for h in header_labels) + "  ESITO"
-    sep    = "─" * len(header)
+    sep    = "-" * len(header)
 
     print(f"\nRISULTATI TEST")
     print(sep)
@@ -171,7 +171,7 @@ def main():
         name = r.filename[:17]
         if not r.ran:
             status = r.error or "skip"
-            print(f"{name:<18}{'—':^{col_w * len(criteria)}}  [{status}]")
+            print(f"{name:<18}{'--':^{col_w * len(criteria)}}  [{status}]")
             continue
 
         cells = []
@@ -186,12 +186,12 @@ def main():
             else:
                 cells.append(f"{'N/D':^{col_w}}")
 
-        esito = "✓ PASS" if all_pass else "✗ FAIL"
+        esito = "PASS" if all_pass else "FAIL"
         print(f"{name:<18}" + "".join(cells) + f"  {esito}")
 
     print(sep)
 
-    # ── Accuracy per criterio ─────────────────────────────────────────────────
+    # -- Accuracy per criterio -------------------------------------------------
     if ran_results:
         print(f"\nACCURACY  ({len(ran_results)} video analizzati)")
         for crit, label_name in zip(criteria, header_labels):
@@ -212,9 +212,9 @@ def main():
         )]
         print(f"\n  OVERALL  {len(overall)}/{len(ran_results)} video con tutti i criteri PASS o N/D")
     else:
-        print("\nNessun video eseguito — annotare gt/labels.json per iniziare i test.")
+        print("\nNessun video eseguito -- annotare gt/labels.json per iniziare i test.")
 
-    print(f"{'─' * 60}\n")
+    print(f"{'-' * 60}\n")
 
     # Exit code: 0 se tutti i video annotati passano, 1 altrimenti
     any_fail = any(

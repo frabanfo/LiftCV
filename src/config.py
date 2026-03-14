@@ -17,7 +17,9 @@ DEPTH_OFFSET_M        = 0.15   # Distanza verticale massima ammessa tra centro a
                                 #           totale atteso a parallela IPF: ~13-17 cm.
                                 # 0.15 m è il valore calibrato empiricamente su riprese
                                 # laterali standard (camera ~1 m, altezza atleta).
-DEPTH_TOLERANCE_M     = 0.02   # ±2 cm → zona borderline attorno alla soglia
+DEPTH_TOLERANCE_M     = 0.01   # ±1 cm → zona borderline attorno alla soglia
+                                # (ridotto da 2 cm: a 2 cm il frame migliore di squat1
+                                # a 16.5 cm cadeva nel borderline invece di INVALID)
 
 # Legacy (non più usato dalla pipeline calibrata, mantenuto per fallback senza px/m)
 DEPTH_THRESHOLD_DEG   = -8.0

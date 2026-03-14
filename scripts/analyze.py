@@ -1,5 +1,5 @@
 """
-Entry point MVP — LiftCV.
+Entry point MVP -- LiftCV.
 
 Uso:
     python scripts/analyze.py <video_path>
@@ -48,14 +48,14 @@ def analyze_video(
         AnalysisResult per tutti i casi (inclusi failure/rejection).
         Se il video non si apre, lancia FileNotFoundError o ValueError.
     """
-    # ── Caricamento video ────────────────────────────────────────────────────
+    # -- Caricamento video ----------------------------------------------------
     cap, meta = load_video(video_path)
 
     print(f"\nVideo caricato: {meta.path.name}")
-    print(f"  {meta.frame_count} frame  |  {meta.fps:.1f} fps  |  {meta.width}×{meta.height}px")
+    print(f"  {meta.frame_count} frame  |  {meta.fps:.1f} fps  |  {meta.width}x{meta.height}px")
     print("\nAnalisi in corso...")
 
-    # ── Scan frame: pose + barra ──────────────────────────────────────────────
+    # -- Scan frame: pose + barra ----------------------------------------------
     pose_frames: list[Optional[PoseFrame]] = []
     bar_x_px:    list[Optional[float]]     = []
     bar_y_px:    list[Optional[float]]     = []
@@ -98,14 +98,14 @@ def analyze_video(
             bar_weight_kg,
         )
 
-    # ── Segmentazione ─────────────────────────────────────────────────────────
+    # -- Segmentazione ---------------------------------------------------------
     bar_y_arr = np.array([y if y is not None else np.nan for y in bar_y_px])
 
     if debug:
         valid_y = bar_y_arr[~np.isnan(bar_y_arr)]
         bottom_idx_dbg = int(np.nanargmax(bar_y_arr))
         print(f"\n[DEBUG] Segnale barra Y:")
-        print(f"  Range:      {valid_y.min():.0f}–{valid_y.max():.0f} px  (Δ={valid_y.max()-valid_y.min():.0f} px)")
+        print(f"  Range:      {valid_y.min():.0f}-{valid_y.max():.0f} px  (delta={valid_y.max()-valid_y.min():.0f} px)")
         print(f"  NaN:        {np.isnan(bar_y_arr).sum()}/{len(bar_y_arr)} frame")
         print(f"  Bottom idx: frame {bottom_idx_dbg}  (Y={bar_y_arr[bottom_idx_dbg]:.0f} px)")
         print(f"  Inizio:     Y={valid_y[0]:.0f} px  |  Fine: Y={valid_y[-1]:.0f} px")
@@ -114,10 +114,10 @@ def analyze_video(
 
     if debug:
         status = "OK" if seg.success else "FALLITA"
-        print(f"\n[DEBUG] Segmentazione — {status}")
+        print(f"\n[DEBUG] Segmentazione -- {status}")
         for s in seg.segments:
-            flag = "  ← PROBLEMA" if s.confidence < CONFIDENCE_BORDERLINE else ""
-            print(f"  {s.phase.name:<10} frame {s.start_frame:>4}–{s.end_frame:<4}  conf={s.confidence:.0%}{flag}")
+            flag = "  <- PROBLEMA" if s.confidence < CONFIDENCE_BORDERLINE else ""
+            print(f"  {s.phase.name:<10} frame {s.start_frame:>4}-{s.end_frame:<4}  conf={s.confidence:.0%}{flag}")
         if not seg.success:
             print(f"  Motivo: {seg.failure_reason}")
 
@@ -130,12 +130,12 @@ def analyze_video(
     descent_seg = seg.get(Phase.DESCENT)
     ascent_seg  = seg.get(Phase.ASCENT)
 
-    # ── Calibrazione scala ────────────────────────────────────────────────────
+    # -- Calibrazione scala ----------------------------------------------------
     px_per_meter = _compute_px_per_meter(pose_frames, setup_seg, height_m)
     if px_per_meter is None:
-        print("  Avviso: scala non calcolabile (tibia non visibile nel setup) — metriche in m/s = N/D.")
+        print("  Avviso: scala non calcolabile (tibia non visibile nel setup) -- metriche in m/s = N/D.")
 
-    # ── Validazione criteri KO ────────────────────────────────────────────────
+    # -- Validazione criteri KO ------------------------------------------------
     depth_result, depth_display = _check_depth_at(
         pose_frames,
         bottom_seg.start_frame,
@@ -159,7 +159,7 @@ def analyze_video(
         _debug_depth(pose_frames, bottom_seg.start_frame, descent_seg.start_frame, ascent_seg.end_frame)
         _debug_feet(pose_frames, setup_seg, descent_seg.start_frame, ascent_seg.end_frame)
 
-    # ── Metriche ─────────────────────────────────────────────────────────────
+    # -- Metriche -------------------------------------------------------------
     metrics = compute_metrics(
         bar_y_px=bar_y_px,
         bar_x_px=bar_x_px,
@@ -169,7 +169,7 @@ def analyze_video(
         bar_weight_kg=bar_weight_kg,
     )
 
-    # ── Validità e confidenza complessiva ─────────────────────────────────────
+    # -- Validità e confidenza complessiva -------------------------------------
     ko_criteria = [depth_result, init_lockout, final_lockout, feet_result]
     valid, confidence = _aggregate_validity(ko_criteria)
 
@@ -199,12 +199,12 @@ def analyze_video(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LiftCV — Analisi squat da video laterale")
+    parser = argparse.ArgumentParser(description="LiftCV -- Analisi squat da video laterale")
     parser.add_argument("video", help="Percorso del video da analizzare")
     parser.add_argument("--debug", action="store_true", help="Stampa info diagnostiche sul segnale barra e segmentazione")
     args = parser.parse_args()
 
-    # ── Caricamento video (validazione path) ─────────────────────────────────
+    # -- Caricamento video (validazione path) ---------------------------------
     # Fatto qui per dare feedback immediato prima dell'input interattivo
     try:
         from src.io.video import load_video as _check_video
@@ -214,7 +214,7 @@ def main():
         print(f"\nERRORE INPUT: {e}")
         sys.exit(1)
 
-    # ── Dati utente ──────────────────────────────────────────────────────────
+    # -- Dati utente ----------------------------------------------------------
     bar_weight_kg     = _ask_float("Peso sul bilanciere (kg) [obbligatorio]: ", required=True)
     height_m          = _ask_height("Altezza atleta (m, es. 1.75) [obbligatorio]: ")
     _ask_float("Peso corporeo (kg) [invio per saltare]: ", required=False)    # noqa: F841
@@ -224,7 +224,7 @@ def main():
     print_report(result)
 
 
-# ── Pipeline helpers ──────────────────────────────────────────────────────────
+# -- Pipeline helpers ----------------------------------------------------------
 
 def _detect_bar(
     pf: Optional[PoseFrame],
@@ -238,7 +238,7 @@ def _detect_bar(
     Strategia per ripresa laterale back-squat:
     Usa la spalla del lato dominante (il lato vicino alla telecamera) come proxy.
     La spalla è sempre visibile in ripresa laterale e la sua Y segue la barra con
-    offset costante → corretto per segmentazione, ROM, velocità (tutti calcoli Δ).
+    offset costante -> corretto per segmentazione, ROM, velocità (tutti calcoli delta).
 
     Il color detection cromatico precedente è stato rimosso: con una ripresa
     laterale tipica produceva <50% di rilevazioni valide e 789px di range spurio
@@ -271,7 +271,7 @@ def _compute_px_per_meter(
 ) -> Optional[float]:
     """
     Stima px/metro usando la tibia come riferimento antropometrico.
-    Lunghezza tibia stimata = altezza × TIBIA_HEIGHT_RATIO (Drillis & Contini).
+    Lunghezza tibia stimata = altezza x TIBIA_HEIGHT_RATIO (Drillis & Contini).
     Misura la tibia in pixel sui frame stabili del setup e ne prende la mediana.
     """
     tibia_m = height_m * TIBIA_HEIGHT_RATIO
@@ -310,7 +310,7 @@ def _check_depth_at(
     px_per_meter: Optional[float] = None,
 ) -> tuple[CriterionResult, Optional[float]]:
     """
-    Profondità sulla finestra [search_start, search_end] (tutta la fase discesa→risalita).
+    Profondità sulla finestra [search_start, search_end] (tutta la fase discesa->risalita).
     Tra i frame con confidenza >= BORDERLINE, sceglie quello con massima profondità
     (hip_y - knee_y più grande = anca più bassa rispetto al ginocchio).
 
@@ -319,7 +319,7 @@ def _check_depth_at(
     Se px_per_meter non è disponibile, ritorna l'angolo in gradi al posto di depth_cm.
 
     Fallback A: se nessun frame supera la soglia di confidenza, prende il frame con
-    massima profondità (max dy) — non quello con massima confidenza.
+    massima profondità (max dy) -- non quello con massima confidenza.
     Fallback B: se non ci sono candidati, restituisce N/D.
     """
     candidates: list[tuple[float, float, CriterionResult]] = []  # (dy, conf, result)
@@ -351,7 +351,7 @@ def _check_depth_at(
         best_dy, _, best_result = max(adequate, key=lambda x: x[0])
     else:
         # Fallback: nessun frame supera la soglia di confidenza.
-        # Prendi il frame più profondo tra tutti — non quello più visibile.
+        # Prendi il frame più profondo tra tutti -- non quello più visibile.
         best_dy, _, best_result = max(candidates, key=lambda x: x[0])
         best_result = CriterionResult(
             passed=None,
@@ -380,7 +380,7 @@ def _check_lockout_at(
     """
     Lockout (estensione ginocchio + anca) in un range di frame.
     Se search_start/search_end sono forniti, scansiona l'intera fase;
-    altrimenti usa una finestra ±window intorno a frame_idx.
+    altrimenti usa una finestra +/-window intorno a frame_idx.
     Sceglie il frame con la migliore estensione tra quelli validi.
     """
     best_result: Optional[CriterionResult] = None
@@ -414,7 +414,7 @@ def _check_lockout_at(
             shoulder_vis, hip_vis, knee_vis, ankle_vis,
             label,
         )
-        # "extension quality" = min(knee_angle, hip_angle) proxy via confidence×passed
+        # "extension quality" = min(knee_angle, hip_angle) proxy via confidencexpassed
         # Use confidence as a secondary sort key; primary: prefer passed=True > None > False
         extension_score = (
             (2.0 if result.passed is True else (1.0 if result.passed is None else 0.0))
@@ -536,7 +536,7 @@ def _debug_depth(
     search_end: int,
 ) -> None:
     """Stampa i landmark anca/ginocchio in ogni frame della finestra di depth check."""
-    print(f"\n[DEBUG] Depth check — finestra frame {search_start}–{search_end}  (bottom={bottom_frame}):")
+    print(f"\n[DEBUG] Depth check -- finestra frame {search_start}-{search_end}  (bottom={bottom_frame}):")
     for fi in range(max(0, search_start), min(len(pose_frames), search_end + 1)):
         pf = pose_frames[fi]
         if pf is None:
@@ -551,12 +551,12 @@ def _debug_depth(
             dy = hip_kp[1] - knee_kp[1]
             dx = hip_kp[0] - knee_kp[0]
             ang = float(np.degrees(np.arctan2(dy, abs(dx))))
-            marker = " ← bottom" if fi == bottom_frame else ""
+            marker = " <- bottom" if fi == bottom_frame else ""
             print(
                 f"  frame {fi:3d}  side={side}"
                 f"  hip=({hip_kp[0]:.0f},{hip_kp[1]:.0f}) vis={hv:.2f}"
                 f"  knee=({knee_kp[0]:.0f},{knee_kp[1]:.0f}) vis={kv:.2f}"
-                f"  dy={dy:+.0f}  angle={ang:+.1f}°{marker}"
+                f"  dy={dy:+.0f}  angle={ang:+.1f} deg{marker}"
             )
         else:
             print(f"  frame {fi:3d}  side={side}  keypoint mancante")
@@ -593,11 +593,11 @@ def _debug_feet(
     ref_y = float(np.median(valid_ref)) if valid_ref else None
 
     if ref_y is None:
-        print(f"\n[DEBUG] Feet (heel {side}) — riferimento non disponibile (frame {rep_start}-{rep_end})")
+        print(f"\n[DEBUG] Feet (heel {side}) -- riferimento non disponibile (frame {rep_start}-{rep_end})")
         return
 
     lift_thresh_px = 30  # approx; exact value depends on px_per_meter
-    print(f"\n[DEBUG] Feet (heel {side}) — ref_y={ref_y:.0f}px  frame {rep_start}–{rep_end}  (soglia ~{lift_thresh_px}px):")
+    print(f"\n[DEBUG] Feet (heel {side}) -- ref_y={ref_y:.0f}px  frame {rep_start}-{rep_end}  (soglia ~{lift_thresh_px}px):")
     for fi in range(rep_start, rep_end + 1):
         y   = heel_y_all[fi]
         vis = heel_vis_all[fi]
@@ -616,13 +616,13 @@ def _ask_float(prompt: str, required: bool) -> float | None:
         raw = input(prompt).strip()
         if not raw:
             if required:
-                print("  → Campo obbligatorio.")
+                print("  -> Campo obbligatorio.")
                 continue
             return None
         try:
             return float(raw.replace(",", "."))
         except ValueError:
-            print("  → Inserisci un numero valido.")
+            print("  -> Inserisci un numero valido.")
 
 
 def _ask_height(prompt: str) -> float:
@@ -630,22 +630,22 @@ def _ask_height(prompt: str) -> float:
     while True:
         raw = input(prompt).strip()
         if not raw:
-            print("  → Campo obbligatorio.")
+            print("  -> Campo obbligatorio.")
             continue
         try:
             val = float(raw.replace(",", "."))
         except ValueError:
-            print("  → Inserisci un numero valido (es. 1.75).")
+            print("  -> Inserisci un numero valido (es. 1.75).")
             continue
         if val > 3.0:
             # Probabilmente inserito in cm
             val_m = val / 100.0
-            confirm = input(f"  → Intendi {val_m:.2f} m? [invio = sì, n = reinserisci]: ").strip().lower()
+            confirm = input(f"  -> Intendi {val_m:.2f} m? [invio = sì, n = reinserisci]: ").strip().lower()
             if confirm in ("", "s", "si", "sì", "y", "yes"):
                 return val_m
             continue
         if val < 1.0:
-            print("  → Altezza non plausibile. Inserisci in metri (es. 1.75).")
+            print("  -> Altezza non plausibile. Inserisci in metri (es. 1.75).")
             continue
         return val
 
