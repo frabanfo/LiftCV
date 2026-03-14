@@ -15,6 +15,8 @@ from typing import Optional
 import numpy as np
 
 from src.config import (
+    DEPTH_OFFSET_M,
+    DEPTH_TOLERANCE_M,
     DEPTH_THRESHOLD_DEG,
     DEPTH_TOLERANCE_DEG,
     FEET_JITTER_FRAMES,
@@ -50,35 +52,60 @@ def check_depth(
     knee_y: float,
     hip_visibility: float,
     knee_visibility: float,
+    px_per_meter: Optional[float] = None,
 ) -> CriterionResult:
     """
     Verifica che la piega dell'anca sia sotto la sommità della rotula
     nel frame di bottom (criterio IPF parallela).
 
-    Angolo della coscia rispetto all'orizzontale (vista laterale):
-      - 0°  = anca geometricamente allo stesso livello del ginocchio
-      - > 0° = sotto parallela geometrica
-      - < 0° = sopra parallela geometrica
+    Metrica preferita (quando px_per_meter è disponibile):
+      Distanza verticale diretta tra centro anca e centro ginocchio in cm.
+      Al parallelo IPF, il centro dell'acetabolo (landmark MediaPipe) si trova
+      tipicamente ~13-17 cm sopra il centro del ginocchio. La soglia
+      DEPTH_OFFSET_M = 0.15 m compensa questo offset anatomico.
 
-    Poiché MediaPipe restituisce il centro del giunto (non la piega dell'anca
-    né la sommità della rotula), l'angolo a parallela IPF reale è circa -4° a -6°.
-    DEPTH_THRESHOLD_DEG compensa questo offset: l'atleta passa il check quando
-    angle_deg >= DEPTH_THRESHOLD_DEG (cioè alla parallela IPF o più in basso).
+      Positivo = anca più bassa del ginocchio (raro in squat normali).
+      Negativo = anca più alta del ginocchio (normale anche al bottom).
+      Lo squat è valido se: (knee_y - hip_y) / px_m <= DEPTH_OFFSET_M
+      ovvero se il centro anca è al massimo 15 cm sopra il centro ginocchio.
+
+    Fallback angolare (quando px_per_meter è None):
+      arctan2(dy, |dx|) vs DEPTH_THRESHOLD_DEG — meno robusto per squats
+      hi-bar o riprese con femore verticale.
     """
     confidence = min(hip_visibility, knee_visibility)
 
-    dx = hip_x - knee_x
-    dy = hip_y - knee_y   # positivo = anca più bassa del ginocchio
-
-    # Angolo della coscia rispetto all'orizzontale.
-    # abs(dx) evita ambiguità sul verso in cui l'atleta è rivolto.
-    angle_deg = float(np.degrees(np.arctan2(dy, abs(dx))))
+    dy = hip_y - knee_y   # positivo = anca più bassa del ginocchio (pixel Y↓)
 
     if confidence < CONFIDENCE_BORDERLINE:
         return CriterionResult(None, confidence, "Keypoint anca/ginocchio non visibili.")
 
-    # L'atleta è alla/sotto parallela IPF quando l'angolo supera la soglia
-    # (che include la compensazione per l'offset anatomico landmark-rotula).
+    if px_per_meter is not None:
+        # ── Metrica calibrata: distanza verticale in cm ──────────────────────
+        # hip_above_cm > 0 → anca sopra ginocchio; < 0 → anca sotto ginocchio
+        hip_above_cm = -dy / px_per_meter * 100.0
+        threshold_cm = DEPTH_OFFSET_M * 100.0
+        tolerance_cm = DEPTH_TOLERANCE_M * 100.0
+
+        below_parallel = hip_above_cm <= threshold_cm
+        in_tolerance   = abs(hip_above_cm - threshold_cm) <= tolerance_cm
+
+        if in_tolerance:
+            return CriterionResult(
+                passed=None,
+                confidence=confidence * 0.75,
+                detail=f"Profondità al limite ({hip_above_cm:+.1f} cm anca-ginocchio, soglia {threshold_cm:.0f} cm).",
+            )
+        return CriterionResult(
+            passed=below_parallel,
+            confidence=confidence,
+            detail=f"Anca {hip_above_cm:+.1f} cm sopra ginocchio (soglia: ≤{threshold_cm:.0f} cm).",
+        )
+
+    # ── Fallback angolare (no calibrazione) ──────────────────────────────────
+    dx = hip_x - knee_x
+    angle_deg = float(np.degrees(np.arctan2(dy, abs(dx))))
+
     below_parallel = angle_deg >= DEPTH_THRESHOLD_DEG
     in_tolerance   = abs(angle_deg - DEPTH_THRESHOLD_DEG) <= DEPTH_TOLERANCE_DEG
 
@@ -88,7 +115,6 @@ def check_depth(
             confidence=confidence * 0.75,
             detail=f"Profondità al limite regolamentare ({angle_deg:+.1f}°). Non determinabile con certezza.",
         )
-
     return CriterionResult(
         passed=below_parallel,
         confidence=confidence,

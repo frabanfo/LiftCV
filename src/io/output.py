@@ -6,7 +6,7 @@ Layout fedele al §7 dell'MVP.
 from dataclasses import dataclass
 from typing import Optional
 
-from src.config import VBT_ERROR_PCT
+from src.config import VBT_ERROR_PCT, CONFIDENCE_HIGH
 
 
 @dataclass
@@ -53,7 +53,7 @@ def print_report(result: AnalysisResult) -> None:
 
     if not result.valid:
         verdict = "NON VALIDA"
-    elif result.confidence < 0.85:
+    elif result.confidence < CONFIDENCE_HIGH:
         verdict = f"BORDERLINE (confidenza {result.confidence:.0%})"
     else:
         verdict = "VALIDA"
@@ -63,9 +63,11 @@ def print_report(result: AnalysisResult) -> None:
 
     # Criteri KO
     print("Criteri KO:")
-    print(f"  Profondità:       {_fmt_bool(result.depth_ok)}  "
-          f"({result.depth_angle_deg:+.1f}° rispetto parallela)" if result.depth_angle_deg is not None else
-          f"  Profondità:       {_fmt_bool(result.depth_ok)}")
+    if result.depth_angle_deg is not None:
+        print(f"  Profondità:       {_fmt_bool(result.depth_ok)}  "
+              f"(anca {result.depth_angle_deg:+.1f} cm sopra ginocchio)")
+    else:
+        print(f"  Profondità:       {_fmt_bool(result.depth_ok)}")
     print(f"  Lockout iniziale: {_fmt_bool(result.initial_lockout_ok)}")
     print(f"  Lockout finale:   {_fmt_bool(result.final_lockout_ok)}")
     print(f"  Piedi:            {_fmt_bool(result.feet_ok)}")

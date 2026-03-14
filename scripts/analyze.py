@@ -136,13 +136,27 @@ def main():
         print("  Avviso: scala non calcolabile (tibia non visibile nel setup) — metriche in m/s = N/D.")
 
     # ── Validazione criteri KO ────────────────────────────────────────────────
-    depth_result, depth_angle = _check_depth_at(pose_frames, bottom_seg.start_frame)
-    init_lockout  = _check_lockout_at(pose_frames, setup_seg.end_frame,    "iniziale")
-    final_lockout = _check_lockout_at(pose_frames, lockout_seg.start_frame, "finale")
+    depth_result, depth_display = _check_depth_at(
+        pose_frames,
+        bottom_seg.start_frame,
+        search_start=descent_seg.start_frame,
+        search_end=ascent_seg.end_frame,
+        px_per_meter=px_per_meter,
+    )
+    init_lockout  = _check_lockout_at(
+        pose_frames, setup_seg.end_frame, "iniziale",
+        search_start=setup_seg.start_frame,
+        search_end=setup_seg.end_frame,
+    )
+    final_lockout = _check_lockout_at(
+        pose_frames, lockout_seg.start_frame, "finale",
+        search_start=lockout_seg.start_frame,
+        search_end=lockout_seg.end_frame,
+    )
     feet_result   = _check_feet_series(pose_frames, setup_seg, descent_seg.start_frame, ascent_seg.end_frame)
 
     if args.debug:
-        _debug_depth(pose_frames, bottom_seg.start_frame)
+        _debug_depth(pose_frames, bottom_seg.start_frame, descent_seg.start_frame, ascent_seg.end_frame)
         _debug_feet(pose_frames, setup_seg, descent_seg.start_frame, ascent_seg.end_frame)
 
     # ── Metriche ─────────────────────────────────────────────────────────────
@@ -168,7 +182,7 @@ def main():
         valid=valid,
         confidence=confidence,
         depth_ok=depth_result.passed,
-        depth_angle_deg=depth_angle,
+        depth_angle_deg=depth_display,
         initial_lockout_ok=init_lockout.passed,
         final_lockout_ok=final_lockout.passed,
         feet_ok=feet_result.passed,
@@ -266,17 +280,26 @@ def _compute_px_per_meter(
 def _check_depth_at(
     pose_frames: list[Optional[PoseFrame]],
     frame_idx: int,
+    search_start: int,
+    search_end: int,
+    px_per_meter: Optional[float] = None,
 ) -> tuple[CriterionResult, Optional[float]]:
     """
-    Profondità in una finestra ±3 frame intorno al bottom.
+    Profondità sulla finestra [search_start, search_end] (tutta la fase discesa→risalita).
     Tra i frame con confidenza >= BORDERLINE, sceglie quello con massima profondità
-    (hip_y - knee_y più grande = anca più bassa).
-    Questo evita di valutare un frame marginalmente più alto del bottom solo perché
-    ha keypoint leggermente più certi.
-    """
-    candidates: list[tuple[float, float, CriterionResult, float]] = []  # (dy, conf, result, angle)
+    (hip_y - knee_y più grande = anca più bassa rispetto al ginocchio).
 
-    for fi in range(max(0, frame_idx - 3), min(len(pose_frames), frame_idx + 4)):
+    Ritorna (CriterionResult, depth_cm) dove depth_cm è la distanza verticale
+    anca-ginocchio in cm (positivo = anca sopra ginocchio) al frame più profondo.
+    Se px_per_meter non è disponibile, ritorna l'angolo in gradi al posto di depth_cm.
+
+    Fallback A: se nessun frame supera la soglia di confidenza, prende il frame con
+    massima profondità (max dy) — non quello con massima confidenza.
+    Fallback B: se non ci sono candidati, restituisce N/D.
+    """
+    candidates: list[tuple[float, float, CriterionResult]] = []  # (dy, conf, result)
+
+    for fi in range(max(0, search_start), min(len(pose_frames), search_end + 1)):
         pf = pose_frames[fi]
         if pf is None:
             continue
@@ -287,54 +310,98 @@ def _check_depth_at(
         knee_vis = pf.visibility.get(f"{side}_knee", 0.0)
         if hip_kp is None or knee_kp is None:
             continue
-        result    = check_depth(hip_kp[0], hip_kp[1], knee_kp[0], knee_kp[1], hip_vis, knee_vis)
-        dx        = hip_kp[0] - knee_kp[0]
-        dy        = hip_kp[1] - knee_kp[1]
-        angle_deg = float(np.degrees(np.arctan2(dy, abs(dx))))
-        candidates.append((dy, min(hip_vis, knee_vis), result, angle_deg))
+        result = check_depth(
+            hip_kp[0], hip_kp[1], knee_kp[0], knee_kp[1],
+            hip_vis, knee_vis, px_per_meter,
+        )
+        dy = hip_kp[1] - knee_kp[1]
+        candidates.append((dy, min(hip_vis, knee_vis), result))
 
     if not candidates:
         return CriterionResult(None, 0.0, "Pose non rilevata al bottom."), None
 
-    # Tra i frame con confidence sufficiente, prendi quello più profondo.
-    # Se nessuno supera la soglia, ricadi sul frame con confidence massima.
-    adequate = [(dy, conf, res, ang) for dy, conf, res, ang in candidates if conf >= CONFIDENCE_BORDERLINE]
+    # Tra i frame con confidence sufficiente, prendi quello più profondo (max dy).
+    adequate = [(dy, conf, res) for dy, conf, res in candidates if conf >= CONFIDENCE_BORDERLINE]
     if adequate:
-        _, _, best_result, best_angle = max(adequate, key=lambda x: x[0])
+        best_dy, _, best_result = max(adequate, key=lambda x: x[0])
     else:
-        _, _, best_result, best_angle = max(candidates, key=lambda x: x[1])
+        # Fallback: nessun frame supera la soglia di confidenza.
+        # Prendi il frame più profondo tra tutti — non quello più visibile.
+        best_dy, _, best_result = max(candidates, key=lambda x: x[0])
+        best_result = CriterionResult(
+            passed=None,
+            confidence=0.0,
+            detail=f"Visibilità anca/ginocchio insufficiente al bottom.",
+        )
 
-    return best_result, best_angle
+    # Valore di ritorno per il report: cm (se calibrato) o angolo (fallback)
+    if px_per_meter is not None:
+        display_val = -best_dy / px_per_meter * 100.0  # cm, positivo = anca sopra ginocchio
+    else:
+        dx = 0.0  # non abbiamo il dx del best_dy; usiamo None
+        display_val = None
+
+    return best_result, display_val
 
 
 def _check_lockout_at(
     pose_frames: list[Optional[PoseFrame]],
     frame_idx: int,
     label: str,
+    search_start: Optional[int] = None,
+    search_end: Optional[int] = None,
+    window: int = 5,
 ) -> CriterionResult:
-    """Lockout (estensione ginocchio + anca) a un singolo frame tramite angoli geometrici."""
-    pf = pose_frames[frame_idx] if frame_idx < len(pose_frames) else None
-    if pf is None:
+    """
+    Lockout (estensione ginocchio + anca) in un range di frame.
+    Se search_start/search_end sono forniti, scansiona l'intera fase;
+    altrimenti usa una finestra ±window intorno a frame_idx.
+    Sceglie il frame con la migliore estensione tra quelli validi.
+    """
+    best_result: Optional[CriterionResult] = None
+    best_extension: float = -1.0
+
+    start = search_start if search_start is not None else frame_idx - window
+    end   = search_end   if search_end   is not None else frame_idx + window
+
+    for fi in range(
+        max(0, start),
+        min(len(pose_frames), end + 1),
+    ):
+        pf = pose_frames[fi]
+        if pf is None:
+            continue
+        side         = _dominant_side(pf, ["hip", "knee", "ankle"])
+        shoulder_kp  = pf.keypoints.get(f"{side}_shoulder")
+        hip_kp       = pf.keypoints.get(f"{side}_hip")
+        knee_kp      = pf.keypoints.get(f"{side}_knee")
+        ankle_kp     = pf.keypoints.get(f"{side}_ankle")
+        shoulder_vis = pf.visibility.get(f"{side}_shoulder", 0.0)
+        hip_vis      = pf.visibility.get(f"{side}_hip",      0.0)
+        knee_vis     = pf.visibility.get(f"{side}_knee",     0.0)
+        ankle_vis    = pf.visibility.get(f"{side}_ankle",    0.0)
+
+        if None in (shoulder_kp, hip_kp, knee_kp, ankle_kp):
+            continue
+
+        result = check_lockout(
+            shoulder_kp, hip_kp, knee_kp, ankle_kp,
+            shoulder_vis, hip_vis, knee_vis, ankle_vis,
+            label,
+        )
+        # "extension quality" = min(knee_angle, hip_angle) proxy via confidence×passed
+        # Use confidence as a secondary sort key; primary: prefer passed=True > None > False
+        extension_score = (
+            (2.0 if result.passed is True else (1.0 if result.passed is None else 0.0))
+            + result.confidence
+        )
+        if extension_score > best_extension:
+            best_extension = extension_score
+            best_result    = result
+
+    if best_result is None:
         return CriterionResult(None, 0.0, f"Pose non rilevata al lockout {label}.")
-
-    side         = _dominant_side(pf, ["hip", "knee", "ankle"])
-    shoulder_kp  = pf.keypoints.get(f"{side}_shoulder")
-    hip_kp       = pf.keypoints.get(f"{side}_hip")
-    knee_kp      = pf.keypoints.get(f"{side}_knee")
-    ankle_kp     = pf.keypoints.get(f"{side}_ankle")
-    shoulder_vis = pf.visibility.get(f"{side}_shoulder", 0.0)
-    hip_vis      = pf.visibility.get(f"{side}_hip",      0.0)
-    knee_vis     = pf.visibility.get(f"{side}_knee",     0.0)
-    ankle_vis    = pf.visibility.get(f"{side}_ankle",    0.0)
-
-    if None in (shoulder_kp, hip_kp, knee_kp, ankle_kp):
-        return CriterionResult(None, 0.0, f"Keypoint assenti al lockout {label}.")
-
-    return check_lockout(
-        shoulder_kp, hip_kp, knee_kp, ankle_kp,
-        shoulder_vis, hip_vis, knee_vis, ankle_vis,
-        label,
-    )
+    return best_result
 
 
 def _check_feet_series(
@@ -434,10 +501,15 @@ def _print_rejection(reason: str, bar_weight_kg: Optional[float] = None) -> None
     print_report(result)
 
 
-def _debug_depth(pose_frames: list[Optional[PoseFrame]], bottom_frame: int) -> None:
+def _debug_depth(
+    pose_frames: list[Optional[PoseFrame]],
+    bottom_frame: int,
+    search_start: int,
+    search_end: int,
+) -> None:
     """Stampa i landmark anca/ginocchio in ogni frame della finestra di depth check."""
-    print(f"\n[DEBUG] Depth check — finestra frame {max(0, bottom_frame-3)}–{min(len(pose_frames)-1, bottom_frame+3)}:")
-    for fi in range(max(0, bottom_frame - 3), min(len(pose_frames), bottom_frame + 4)):
+    print(f"\n[DEBUG] Depth check — finestra frame {search_start}–{search_end}  (bottom={bottom_frame}):")
+    for fi in range(max(0, search_start), min(len(pose_frames), search_end + 1)):
         pf = pose_frames[fi]
         if pf is None:
             print(f"  frame {fi:3d}  pose=None")

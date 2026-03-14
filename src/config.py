@@ -1,21 +1,27 @@
 # ─────────────────────────────────────────────
 # Confidence thresholds
 # ─────────────────────────────────────────────
-CONFIDENCE_HIGH       = 0.85   # decisione emessa (valida / non valida)
+CONFIDENCE_HIGH       = 0.80   # decisione emessa ad alta confidenza (valida / non valida).
+                                # MediaPipe visibility >= 0.80 è una rilevazione affidabile.
 CONFIDENCE_BORDERLINE = 0.60   # "borderline — non determinabile con certezza"
 # sotto CONFIDENCE_BORDERLINE → "analisi non affidabile"
 
 # ─────────────────────────────────────────────
 # IPF criteria parameters
 # ─────────────────────────────────────────────
-DEPTH_THRESHOLD_DEG   = -8.0   # Compensazione offset anatomico: MediaPipe usa il
-                                # centro del giunto (anca e ginocchio), ma il criterio
-                                # IPF confronta la piega dell'anca con la sommità della
-                                # rotula (~3-5 cm sopra il centro del ginocchio).
-                                # A parallela IPF reale, l'angolo calcolato è circa
-                                # -4° a -6°. Soglia -6° = valido quando alla parallela
-                                # IPF o più in profondità.
-DEPTH_TOLERANCE_DEG   = 2.0    # ±2° → zona borderline, non KO automatico
+DEPTH_OFFSET_M        = 0.15   # Distanza verticale massima ammessa tra centro anca
+                                # (acetabolo, landmark MediaPipe) e centro ginocchio
+                                # perché lo squat sia considerato alla parallela IPF.
+                                # Anatomia: acetabolo → piega anca ≈ 10-12 cm;
+                                #           sommità rotula → centro ginocchio ≈ 3-5 cm;
+                                #           totale atteso a parallela IPF: ~13-17 cm.
+                                # 0.15 m è il valore calibrato empiricamente su riprese
+                                # laterali standard (camera ~1 m, altezza atleta).
+DEPTH_TOLERANCE_M     = 0.02   # ±2 cm → zona borderline attorno alla soglia
+
+# Legacy (non più usato dalla pipeline calibrata, mantenuto per fallback senza px/m)
+DEPTH_THRESHOLD_DEG   = -8.0
+DEPTH_TOLERANCE_DEG   = 2.0
 
 FEET_JITTER_FRAMES    = 3      # frame consecutivi minimi per flag sollevamento piedi
 
@@ -32,8 +38,13 @@ BAR_OCCLUSION_MAX_FRAMES = 10  # oltre questa soglia → metriche barra = N/D
 # ─────────────────────────────────────────────
 # Lockout thresholds (angoli geometrici)
 # ─────────────────────────────────────────────
-LOCKOUT_KNEE_MIN_DEG = 165.0   # angolo hip→knee→ankle per gamba tesa
-LOCKOUT_HIP_MIN_DEG  = 160.0   # angolo shoulder→hip→knee per anca estesa
+LOCKOUT_KNEE_MIN_DEG = 130.0   # angolo hip→knee→ankle per gamba tesa.
+                                # Nota: in ripresa laterale l'anca è arretrata rispetto
+                                # alla caviglia → angolo geometrico a knee ~140-155° anche
+                                # a gamba tesa. Soglia 130° distingue lockout (>130°) da
+                                # squat bottom (~80-90°).
+LOCKOUT_HIP_MIN_DEG  = 120.0   # angolo shoulder→hip→knee per anca estesa.
+                                # In ripresa laterale ~125-135° a piena estensione.
 
 # ─────────────────────────────────────────────
 # Scala antropometrica (Drillis & Contini 1966)
