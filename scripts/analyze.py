@@ -29,31 +29,33 @@ from src import config
 from src.config import TIBIA_HEIGHT_RATIO, CONFIDENCE_BORDERLINE
 
 
-def main():
-    parser = argparse.ArgumentParser(description="LiftCV — Analisi squat da video laterale")
-    parser.add_argument("video", help="Percorso del video da analizzare")
-    parser.add_argument("--debug", action="store_true", help="Stampa info diagnostiche sul segnale barra e segmentazione")
-    args = parser.parse_args()
+def analyze_video(
+    video_path: str,
+    bar_weight_kg: float,
+    height_m: float,
+    debug: bool = False,
+) -> AnalysisResult:
+    """
+    Esegue la pipeline completa di analisi squat.
 
+    Parametri:
+        video_path:    Percorso al video da analizzare.
+        bar_weight_kg: Peso sul bilanciere in kg (obbligatorio).
+        height_m:      Altezza atleta in metri (obbligatorio).
+        debug:         Se True, stampa diagnostica aggiuntiva a console.
+
+    Ritorna:
+        AnalysisResult per tutti i casi (inclusi failure/rejection).
+        Se il video non si apre, lancia FileNotFoundError o ValueError.
+    """
     # ── Caricamento video ────────────────────────────────────────────────────
-    try:
-        cap, meta = load_video(args.video)
-    except (FileNotFoundError, ValueError) as e:
-        print(f"\nERRORE INPUT: {e}")
-        sys.exit(1)
+    cap, meta = load_video(video_path)
 
     print(f"\nVideo caricato: {meta.path.name}")
     print(f"  {meta.frame_count} frame  |  {meta.fps:.1f} fps  |  {meta.width}×{meta.height}px")
-
-    # ── Dati utente ──────────────────────────────────────────────────────────
-    bar_weight_kg     = _ask_float("Peso sul bilanciere (kg) [obbligatorio]: ", required=True)
-    height_m          = _ask_height("Altezza atleta (m, es. 1.75) [obbligatorio]: ")
-    body_weight_kg    = _ask_float("Peso corporeo (kg) [invio per saltare]: ", required=False)    # noqa: F841  (reserved for future use)
-    historical_1rm_kg = _ask_float("1RM storico (kg) [invio per saltare]: ",   required=False)   # noqa: F841
-
-    # ── Scan frame: pose + barra ──────────────────────────────────────────────
     print("\nAnalisi in corso...")
 
+    # ── Scan frame: pose + barra ──────────────────────────────────────────────
     pose_frames: list[Optional[PoseFrame]] = []
     bar_x_px:    list[Optional[float]]     = []
     bar_y_px:    list[Optional[float]]     = []
@@ -84,23 +86,22 @@ def main():
 
     cap.release()
 
-    if args.debug:
+    if debug:
         pose_detected = sum(1 for pf in pose_frames if pf is not None)
         print(f"\n[DEBUG] Pose rilevata:   {pose_detected}/{total_frames} frame ({pose_detected/total_frames:.0%})")
         print(f"[DEBUG] Barra rilevata:  {detection_count}/{total_frames} frame ({detection_count/total_frames:.0%})")
 
     if not bar_initialized:
-        _print_rejection(
+        return _make_rejection_result(
             "Barra non rilevata nel video. "
             "Assicurarsi che la barra sia visibile e illuminata correttamente.",
             bar_weight_kg,
         )
-        return
 
     # ── Segmentazione ─────────────────────────────────────────────────────────
     bar_y_arr = np.array([y if y is not None else np.nan for y in bar_y_px])
 
-    if args.debug:
+    if debug:
         valid_y = bar_y_arr[~np.isnan(bar_y_arr)]
         bottom_idx_dbg = int(np.nanargmax(bar_y_arr))
         print(f"\n[DEBUG] Segnale barra Y:")
@@ -111,7 +112,7 @@ def main():
 
     seg = segment_repetition(bar_y_arr, meta.fps)
 
-    if args.debug:
+    if debug:
         status = "OK" if seg.success else "FALLITA"
         print(f"\n[DEBUG] Segmentazione — {status}")
         for s in seg.segments:
@@ -121,8 +122,7 @@ def main():
             print(f"  Motivo: {seg.failure_reason}")
 
     if not seg.success:
-        _print_rejection(seg.failure_reason, bar_weight_kg)
-        return
+        return _make_rejection_result(seg.failure_reason, bar_weight_kg)
 
     bottom_seg  = seg.get(Phase.BOTTOM)
     setup_seg   = seg.get(Phase.SETUP)
@@ -155,7 +155,7 @@ def main():
     )
     feet_result   = _check_feet_series(pose_frames, setup_seg, descent_seg.start_frame, ascent_seg.end_frame, px_per_meter=px_per_meter)
 
-    if args.debug:
+    if debug:
         _debug_depth(pose_frames, bottom_seg.start_frame, descent_seg.start_frame, ascent_seg.end_frame)
         _debug_feet(pose_frames, setup_seg, descent_seg.start_frame, ascent_seg.end_frame)
 
@@ -178,7 +178,7 @@ def main():
         if metrics.bar_deviation_cm is not None else None
     )
 
-    result = AnalysisResult(
+    return AnalysisResult(
         valid=valid,
         confidence=confidence,
         depth_ok=depth_result.passed,
@@ -196,6 +196,31 @@ def main():
         symmetry_pct=None,
         symmetry_confidence=None,
     )
+
+
+def main():
+    parser = argparse.ArgumentParser(description="LiftCV — Analisi squat da video laterale")
+    parser.add_argument("video", help="Percorso del video da analizzare")
+    parser.add_argument("--debug", action="store_true", help="Stampa info diagnostiche sul segnale barra e segmentazione")
+    args = parser.parse_args()
+
+    # ── Caricamento video (validazione path) ─────────────────────────────────
+    # Fatto qui per dare feedback immediato prima dell'input interattivo
+    try:
+        from src.io.video import load_video as _check_video
+        cap_check, _ = _check_video(args.video)
+        cap_check.release()
+    except (FileNotFoundError, ValueError) as e:
+        print(f"\nERRORE INPUT: {e}")
+        sys.exit(1)
+
+    # ── Dati utente ──────────────────────────────────────────────────────────
+    bar_weight_kg     = _ask_float("Peso sul bilanciere (kg) [obbligatorio]: ", required=True)
+    height_m          = _ask_height("Altezza atleta (m, es. 1.75) [obbligatorio]: ")
+    _ask_float("Peso corporeo (kg) [invio per saltare]: ", required=False)    # noqa: F841
+    _ask_float("1RM storico (kg) [invio per saltare]: ",   required=False)    # noqa: F841
+
+    result = analyze_video(args.video, bar_weight_kg, height_m, debug=args.debug)
     print_report(result)
 
 
@@ -481,8 +506,9 @@ def _aggregate_validity(criteria: list[CriterionResult]) -> tuple[bool, float]:
     return valid, confidence
 
 
-def _print_rejection(reason: str, bar_weight_kg: Optional[float] = None) -> None:
-    result = AnalysisResult(
+def _make_rejection_result(reason: str, bar_weight_kg: Optional[float] = None) -> AnalysisResult:
+    """Crea un AnalysisResult di rigetto con motivo esplicito."""
+    return AnalysisResult(
         valid=False,
         confidence=0.0,
         depth_ok=None,
@@ -501,7 +527,6 @@ def _print_rejection(reason: str, bar_weight_kg: Optional[float] = None) -> None
         symmetry_confidence=None,
         rejection_reason=reason,
     )
-    print_report(result)
 
 
 def _debug_depth(
