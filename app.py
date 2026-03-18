@@ -142,17 +142,29 @@ def _show_results(result: AnalysisResult) -> None:
 # ── Analysis execution ────────────────────────────────────────────────────────
 
 if run:
-    tmp_path = None
+    tmp_path     = None
+    tmp_out_path = None
     try:
         suffix = Path(uploaded.name).suffix or ".mp4"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp.write(uploaded.read())
             tmp_path = tmp.name
 
-        with st.spinner("Analysis in progress..."):
-            result = analyze_video(tmp_path, bar_weight_kg, height_m, debug)
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_out:
+            tmp_out_path = tmp_out.name
 
-        st.session_state["result"] = result
+        with st.spinner("Analysis in progress..."):
+            result = analyze_video(tmp_path, bar_weight_kg, height_m, debug,
+                                   output_video_path=tmp_out_path)
+
+        # Read annotated video bytes before cleanup
+        annotated_bytes = None
+        if tmp_out_path and os.path.exists(tmp_out_path) and os.path.getsize(tmp_out_path) > 0:
+            with open(tmp_out_path, "rb") as f:
+                annotated_bytes = f.read()
+
+        st.session_state["result"]          = result
+        st.session_state["annotated_video"] = annotated_bytes
 
     except (FileNotFoundError, ValueError) as e:
         st.error(f"Video error: {e}")
@@ -163,7 +175,13 @@ if run:
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
+        if tmp_out_path and os.path.exists(tmp_out_path):
+            os.unlink(tmp_out_path)
 
 # Display stored result (persists across sidebar interactions)
 if "result" in st.session_state:
     _show_results(st.session_state["result"])
+
+if st.session_state.get("annotated_video"):
+    st.subheader("Annotated Video")
+    st.video(st.session_state["annotated_video"])
