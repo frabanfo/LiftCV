@@ -86,3 +86,5 @@ htmlcov/
 
 # ===============================
 docs/
+# Editor temp files
+*.tmp
